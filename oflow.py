@@ -81,6 +81,8 @@ MIN_AUDIO_DURATION_SECONDS = 0.5  # Minimum recording duration
 MIN_AUDIO_AMPLITUDE = 0.02  # Minimum amplitude to detect speech
 CHUNK_DURATION_SECONDS = 25  # Max chunk duration for Whisper (split long audio)
 CHUNK_SPLIT_WINDOW_SECONDS = 3  # Window to search for silence near split point
+MAX_RECORDING_SECONDS = 300  # Auto-stop runaway recordings to prevent leaks from stuck state
+STREAM_WARN_INTERVAL_SECONDS = 5.0  # Throttle audio-stream distress warnings
 
 # API configuration
 API_TIMEOUT_SECONDS = 30.0  # Timeout for API requests
@@ -989,6 +991,8 @@ class VoiceDictationServer:
 
         # Audio stream (created on-demand, not always running)
         self.stream = None
+        self._recording_watchdog: threading.Timer | None = None
+        self._last_stream_warn = 0.0
 
         # Setup socket
         if os.path.exists(SOCKET_PATH):
@@ -1030,17 +1034,28 @@ class VoiceDictationServer:
 
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info: dict, status: int):
         """Callback for audio stream."""
-        if self.is_recording:
+        if not self.is_recording:
+            return
+
+        if status:
+            self._warn_stream_distress(f"Audio stream status: {status}")
+
+        try:
+            self.audio_queue.put_nowait(indata.copy())
+        except queue.Full:
             try:
+                self.audio_queue.get_nowait()
                 self.audio_queue.put_nowait(indata.copy())
-            except queue.Full:
-                # Queue full - recording too long, discard oldest data
-                logger.warning("Audio queue full, discarding old data")
-                try:
-                    self.audio_queue.get_nowait()  # Remove oldest
-                    self.audio_queue.put_nowait(indata.copy())  # Add new
-                except queue.Empty:
-                    pass
+            except queue.Empty:
+                pass
+            self._warn_stream_distress("Audio queue full, discarding oldest data")
+
+    def _warn_stream_distress(self, message: str):
+        """Rate-limited warning for audio stream issues to avoid log spam."""
+        now = time.monotonic()
+        if now - self._last_stream_warn >= STREAM_WARN_INTERVAL_SECONDS:
+            logger.warning(message)
+            self._last_stream_warn = now
 
     def _signal_handler(self, signum: int, frame):
         """Handle shutdown signals."""
@@ -1079,28 +1094,70 @@ class VoiceDictationServer:
 
             self.is_recording = True
             self.audio_data = []
+            self._last_stream_warn = 0.0
 
-            # Start audio stream on-demand (saves CPU when idle)
-            self.stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=AUDIO_CHANNELS,
-                dtype=np.float32,
-                blocksize=1600,  # 100ms chunks → 10 callbacks/sec → 3000 chunks = 5 min
-                callback=self._audio_callback,
-            )
-            self.stream.start()
+            try:
+                # Start audio stream on-demand (saves CPU when idle)
+                self.stream = sd.InputStream(
+                    samplerate=SAMPLE_RATE,
+                    channels=AUDIO_CHANNELS,
+                    dtype=np.float32,
+                    blocksize=1600,  # 100ms chunks → 10 callbacks/sec → 3000 chunks = 5 min
+                    callback=self._audio_callback,
+                )
+                self.stream.start()
 
-            self.waybar_state.recording()
-            self.audio_feedback.play_start()
+                self.waybar_state.recording()
+                self.audio_feedback.play_start()
 
-            # Reload settings in case they changed
-            settings = load_settings()
-            self.text_processor = TextProcessor(
-                enable_punctuation=settings.get("enableSpokenPunctuation", False),
-                replacements=settings.get("wordReplacements", {}),
-            )
+                # Reload settings in case they changed
+                settings = load_settings()
+                self.text_processor = TextProcessor(
+                    enable_punctuation=settings.get("enableSpokenPunctuation", False),
+                    replacements=settings.get("wordReplacements", {}),
+                )
+
+                # Watchdog auto-stops a stuck recording so a missed key-up
+                # cannot leave the stream open and leak indefinitely.
+                self._recording_watchdog = threading.Timer(
+                    MAX_RECORDING_SECONDS, self._on_recording_timeout
+                )
+                self._recording_watchdog.daemon = True
+                self._recording_watchdog.start()
+            except Exception:
+                logger.exception("Failed to start recording, rolling back")
+                self._rollback_recording()
+                raise
 
             logger.info("Recording started")
+
+    def _rollback_recording(self):
+        """Reset recording state after a failed start. Caller must hold the lock."""
+        self.is_recording = False
+        if self._recording_watchdog is not None:
+            self._recording_watchdog.cancel()
+            self._recording_watchdog = None
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        self.audio_data = []
+        try:
+            self.waybar_state.idle()
+        except Exception:
+            pass
+
+    def _on_recording_timeout(self):
+        """Fired by the watchdog when a recording exceeds MAX_RECORDING_SECONDS."""
+        if not self.is_recording:
+            return
+        logger.warning(
+            f"Recording exceeded {MAX_RECORDING_SECONDS}s, auto-stopping to prevent leak"
+        )
+        self._stop_recording()
 
     def _stop_recording(self):
         """Stop recording and process audio."""
@@ -1109,6 +1166,10 @@ class VoiceDictationServer:
             if not self.is_recording:
                 logger.debug("Not recording, ignoring stop command")
                 return
+
+            if self._recording_watchdog is not None:
+                self._recording_watchdog.cancel()
+                self._recording_watchdog = None
 
             # Set waybar state immediately while still locked
             self.waybar_state.transcribing()
