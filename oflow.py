@@ -696,14 +696,21 @@ HALLUCINATION_PATTERNS = [
     "is there anything",
     "let me know if",
     "feel free to ask",
-    # Whisper conditioning prompt leakage
-    "async handler",
-    "refactor the async handler",
-    "let's refactor",
+]
+
+# Whisper conditioning prompt leakage. The priming prompt in transcribe_audio
+# contains engineering vocabulary; when audio is weak Whisper sometimes echoes
+# the prompt instead of transcribing. Real leakage repeats multiple phrases
+# verbatim — a single phrase is usually legitimate user dictation about
+# engineering work, so we only filter when 2+ phrases co-occur.
+PROMPT_LEAKAGE_PHRASES = [
     "push the code",
     "open a pr",
+    "check the api endpoint",
     "run pytest",
     "deploy to kubernetes",
+    "let's refactor",
+    "async handler",
 ]
 
 # Patterns that indicate Whisper is answering instead of transcribing
@@ -727,32 +734,39 @@ AI_RESPONSE_STARTS = [
 
 
 def is_hallucination(text: str) -> bool:
-    """Check if text is likely a Whisper hallucination or AI response."""
+    """Check if text is likely a Whisper hallucination or AI response.
+
+    Logs the matched pattern at INFO when filtering so users can see exactly
+    why a recording produced no output.
+    """
     if not text:
         return False
     text_lower = text.lower().strip()
 
-    # Very short text that's just punctuation
     if len(text) < 3 or text in [".", "..", "...", "!", "?", ","]:
+        logger.info(f"Filtered hallucination (too short): {text!r}")
         return True
 
-    # Check for common hallucination patterns, but ONLY for short text.
-    # Real Whisper hallucinations are brief repetitive phrases ("Thank you",
-    # "Subscribe", etc). Long transcriptions are real speech that may
-    # legitimately contain these phrases, so skip the substring check.
+    # Common hallucination patterns — substring match only for short text,
+    # since long transcriptions may legitimately contain these phrases.
     if len(text_lower) < 100:
         for pattern in HALLUCINATION_PATTERNS:
             if pattern in text_lower:
+                logger.info(f"Filtered hallucination (matched {pattern!r}): {text[:80]}")
                 return True
 
-    # Detect AI-style responses (Whisper answering instead of transcribing)
+    # Conditioning-prompt leakage: require 2+ matches, since a single phrase
+    # is usually legitimate engineering dictation.
+    leakage_hits = [p for p in PROMPT_LEAKAGE_PHRASES if p in text_lower]
+    if len(leakage_hits) >= 2:
+        logger.info(f"Filtered prompt leakage (matched {leakage_hits}): {text[:80]}")
+        return True
+
     for start in AI_RESPONSE_STARTS:
         if text_lower.startswith(start):
-            logger.debug(f"Filtered AI response: {text[:50]}...")
+            logger.info(f"Filtered AI response (starts with {start!r}): {text[:80]}")
             return True
 
-    # Catch generic AI-style responses: short text with question marks asking
-    # if the user needs help, or text that reads like a chatbot reply
     if len(text_lower) < 100:
         ai_phrases = [
             "what would you like",
@@ -774,7 +788,7 @@ def is_hallucination(text: str) -> bool:
         ]
         for phrase in ai_phrases:
             if phrase in text_lower:
-                logger.debug(f"Filtered AI response: {text[:50]}...")
+                logger.info(f"Filtered AI response (matched {phrase!r}): {text[:80]}")
                 return True
 
     return False
@@ -819,7 +833,6 @@ async def transcribe_audio(
         if response.status_code == 200:
             text = response.json().get("text", "").strip()
             if is_hallucination(text):
-                logger.debug(f"Filtered hallucination: {text}")
                 return ""
             return text
         elif response.status_code == 401:
@@ -1274,12 +1287,11 @@ class VoiceDictationServer:
 
             if not raw_text:
                 logger.error(
-                    f"❌ Transcription failed. Check your {provider.capitalize()} API key. "
-                    f"Get one at: https://console.groq.com/keys"
-                    if provider == "groq"
-                    else "https://platform.openai.com/api-keys"
+                    "❌ Transcription produced no text. "
+                    "See log above for the reason "
+                    "(filtered as hallucination, empty API response, or auth/network error)."
                 )
-                self.waybar_state.error("Transcription failed")
+                self.waybar_state.error("No text")
                 self.audio_feedback.play_error()
                 return
 

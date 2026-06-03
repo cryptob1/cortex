@@ -89,3 +89,25 @@ class TestHallucinationDetection:
         # But the specific hallucination patterns should still trigger
         assert is_hallucination("subscribe to my channel")
         assert is_hallucination("please subscribe")
+
+    @pytest.mark.unit
+    def test_prompt_leakage_filtered(self):
+        """Verbatim chunks of the Whisper priming prompt should be filtered."""
+        # Real leakage echoes multiple priming-prompt phrases verbatim.
+        assert is_hallucination("Push the code to Git and open a PR.")
+        assert is_hallucination("Check the API endpoint, run pytest, then deploy to Kubernetes.")
+        assert is_hallucination("Let's refactor the async handler.")
+
+    @pytest.mark.unit
+    def test_single_prompt_phrase_is_legitimate(self):
+        """A single priming-prompt phrase in legit dictation must pass through.
+
+        Regression test: the old filter substring-matched these phrases and
+        silently discarded real engineering speech, leaving the user with a
+        misleading 'Check your API key' error.
+        """
+        assert not is_hallucination("We need to push the code to staging tonight.")
+        assert not is_hallucination("Can you run pytest on the auth module?")
+        assert not is_hallucination("Update the e2e script to open a PR automatically.")
+        assert not is_hallucination("The async handler in the worker is leaking memory.")
+        assert not is_hallucination("Let's refactor the storage layer next sprint.")
