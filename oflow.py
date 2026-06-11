@@ -1110,15 +1110,10 @@ class VoiceDictationServer:
             self._last_stream_warn = 0.0
 
             try:
-                # Start audio stream on-demand (saves CPU when idle)
-                self.stream = sd.InputStream(
-                    samplerate=SAMPLE_RATE,
-                    channels=AUDIO_CHANNELS,
-                    dtype=np.float32,
-                    blocksize=1600,  # 100ms chunks → 10 callbacks/sec → 3000 chunks = 5 min
-                    callback=self._audio_callback,
-                )
-                self.stream.start()
+                # Start audio stream on-demand (saves CPU when idle).
+                # Self-heals a stale PortAudio device list (e.g. after a
+                # PipeWire/WirePlumber restart) by reinitializing and retrying.
+                self.stream = self._open_audio_stream()
 
                 self.waybar_state.recording()
                 self.audio_feedback.play_start()
@@ -1143,6 +1138,43 @@ class VoiceDictationServer:
                 raise
 
             logger.info("Recording started")
+
+    def _open_audio_stream(self):
+        """Open and start the input stream, recovering from a stale PortAudio
+        device list.
+
+        PortAudio snapshots the ALSA/PipeWire device list when it first
+        initializes and never refreshes it. After the audio server
+        (PipeWire/WirePlumber) restarts, the cached default-source handle is
+        gone and ``InputStream`` open fails with ``ALSA error -2`` ('No such
+        file or directory'). Reinitializing PortAudio re-enumerates devices, so
+        we retry once after a clean reinit before giving up.
+        """
+
+        def _make():
+            stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=AUDIO_CHANNELS,
+                dtype=np.float32,
+                blocksize=1600,  # 100ms chunks → 10 callbacks/sec → 3000 chunks = 5 min
+                callback=self._audio_callback,
+            )
+            stream.start()
+            return stream
+
+        try:
+            return _make()
+        except Exception:
+            logger.warning(
+                "InputStream open failed; reinitializing PortAudio (device list "
+                "likely stale after an audio-server restart) and retrying once"
+            )
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception:
+                logger.exception("PortAudio reinitialization failed")
+            return _make()
 
     def _rollback_recording(self):
         """Reset recording state after a failed start. Caller must hold the lock."""
@@ -1351,6 +1383,20 @@ class VoiceDictationServer:
                             self._stop_recording()
                         else:
                             self._start_recording()
+                except Exception:
+                    # A failed recording must never tear down the IPC server,
+                    # otherwise the global shortcut goes permanently dead until
+                    # oflow is manually restarted. Log, signal the failure, and
+                    # keep listening.
+                    logger.exception("Command handling failed; server staying alive")
+                    try:
+                        self.waybar_state.error("Recording failed")
+                    except Exception:
+                        pass
+                    try:
+                        self.audio_feedback.play_error()
+                    except Exception:
+                        pass
                 finally:
                     conn.close()
         finally:
