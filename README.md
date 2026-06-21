@@ -2,14 +2,18 @@
 
 **Voice-to-text for Omarchy** — Like [Wispr Flow](https://wisprflow.ai), but open source and local-first.
 
-Press a key, speak, press again — your words appear wherever you're typing.
+Hold F8, speak, release — your words appear wherever you're typing.
 
 ## Features
 
-- **Instant transcription** — Groq Whisper runs at 200x realtime (~0.5s latency)
+- **Instant transcription** — Groq Whisper (`whisper-large-v3-turbo`), ~0.6s latency
+- **Push-to-talk** — Hold **F8** to record, release to stop & paste
+- **One-shot paste** — Pastes the whole result at once (via ydotool), not char-by-char
+- **On-screen overlay** — Live recording level meter at the bottom of the screen
+- **Pauses your media** — Auto-pauses playing music/video while you dictate, resumes after
+- **Spoken submit** — End with "enter" (or "submit") to press Enter after pasting
 - **Smart cleanup** — Auto-fixes grammar, removes filler words, formats text
 - **Waybar integration** — Click status icon to open settings, visual feedback while recording
-- **Audio feedback** — Configurable sounds for start/stop/error
 - **Spoken punctuation** — Say "period" or "new line" to insert symbols
 - **Privacy-first** — All data stored locally, no cloud backend
 - **Open source** — Built with Python + Tauri
@@ -18,12 +22,19 @@ Press a key, speak, press again — your words appear wherever you're typing.
 
 ### Requirements
 
-- **wtype** — Types text into your active window (Wayland)
-- **webkit2gtk-4.1** — Web rendering engine for Tauri desktop app
+- **ydotool** — Pastes/types text into the active window (needs the `ydotoold` daemon)
+- **playerctl** — Pauses playing media while you dictate
+- **gtk4-layer-shell**, **python-gobject**, **python-cairo** — The on-screen recording overlay
+- **webkit2gtk-4.1** — Web rendering engine for the Tauri desktop app
 - **jq** — JSON processor for Waybar config manipulation
 
 ```bash
-sudo pacman -S wtype webkit2gtk-4.1 jq
+sudo pacman -S ydotool playerctl gtk4-layer-shell python-gobject python-cairo webkit2gtk-4.1 jq
+
+# Enable the ydotool daemon (one-shot paste). The package ships a udev rule for
+# /dev/uinput access; add yourself to the input group and re-login if needed:
+sudo usermod -aG input "$USER"
+systemctl --user enable --now ydotool.service
 ```
 
 ### Quick Install (Arch/Omarchy)
@@ -47,14 +58,14 @@ chmod +x oflow-*.AppImage
 
 1. Get a free Groq API key: https://console.groq.com/keys
 2. Click the `󰍬` microphone icon in Waybar → Settings → paste your Groq key
-3. Press **Super+D** to start recording, press again to stop and transcribe
+3. **Hold F8** to record, release to stop, transcribe, and paste
 
 That's it.
 
 ## How It Works
 
 ```
-Press Super+D → Speak → Press Super+D → Text appears in active window
+Hold F8 → Speak → Release → Text appears in active window
 ```
 
 | You say | You get |
@@ -75,7 +86,7 @@ If you're an LLM helping a user install oflow on Arch/Omarchy:
 
 ```bash
 # 1. Install runtime dependencies
-sudo pacman -S wtype webkit2gtk-4.1 jq
+sudo pacman -S ydotool playerctl gtk4-layer-shell python-gobject python-cairo webkit2gtk-4.1 jq
 
 # 2. Clone and install
 git clone https://github.com/CryptoB1/oflow.git
@@ -87,7 +98,7 @@ Or using AppImage:
 
 ```bash
 # 1. Install dependencies (required)
-sudo pacman -S wtype webkit2gtk-4.1 jq
+sudo pacman -S ydotool playerctl gtk4-layer-shell python-gobject python-cairo webkit2gtk-4.1 jq
 
 # 2. Download and run AppImage
 curl -L -o oflow.AppImage "https://github.com/CryptoB1/oflow/releases/latest/download/oflow.AppImage"
@@ -95,7 +106,7 @@ chmod +x oflow.AppImage
 ./oflow.AppImage
 ```
 
-The user needs a Groq API key from https://console.groq.com/keys (free tier available). They can paste it in Settings after launching the app. The hotkey is **Super+D** (toggle mode: press to start, press again to stop).
+The user needs a Groq API key from https://console.groq.com/keys (free tier available). They can paste it in Settings after launching the app. The hotkey is **F8** (push-to-talk: hold to record, release to stop & paste).
 
 ## Build from Source
 
@@ -103,7 +114,7 @@ The user needs a Groq API key from https://console.groq.com/keys (free tier avai
 
 ```bash
 # Runtime
-sudo pacman -S wtype
+sudo pacman -S ydotool playerctl gtk4-layer-shell python-gobject python-cairo
 
 # Build tools (Tauri + Python)
 sudo pacman -S webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module gtk3 libappindicator-gtk3 librsvg libvips patchelf nodejs npm rust
@@ -123,7 +134,7 @@ make install  # Full install: build app, setup hotkey, Waybar & autostart
 This will:
 1. Build the Tauri app
 2. Install `oflow` and `oflow-ctl` to `~/.local/bin/`
-3. Configure **Super+D** hotkey (toggle mode)
+3. Configure **F8** push-to-talk hotkey
 4. Add Waybar status indicator with colored icons (green/red/yellow)
 5. Enable autostart on login
 6. Launch oflow
@@ -175,7 +186,7 @@ make uninstall
 This removes:
 - All binaries from `~/.local/bin/` (oflow, oflow-ctl, oflow-toggle)
 - Waybar module and CSS styling
-- Hyprland hotkey binding (Super+D)
+- Hyprland hotkey binding (F8 push-to-talk)
 - Autostart entry
 - Settings directory (`~/.oflow/`)
 - Runtime files and sockets
@@ -210,24 +221,23 @@ Settings are stored in `~/.oflow/settings.json`:
 
 ## Hotkey Configuration
 
-### Default: Toggle Mode
+### Default: Push-to-Talk (F8)
 
-**Super+D** — Press to start recording, press again to stop and transcribe.
+**Hold F8** to record, release to stop, transcribe, and paste.
 
 The hotkey is configured automatically during `make install` in `~/.config/hypr/bindings.conf`:
 
 ```ini
-bind = SUPER, D, exec, ~/.local/bin/oflow-ctl toggle
+bind  = , F8, exec, ~/.local/bin/oflow-ctl start
+bindr = , F8, exec, ~/.local/bin/oflow-ctl stop
 ```
 
-### Alternative: Push-to-Talk Mode
+### Alternative: Toggle Mode
 
-If you prefer hold-to-record instead of toggle, edit `~/.config/hypr/bindings.conf`:
+If you prefer press-to-start / press-to-stop instead of hold, use a single bind:
 
 ```ini
-# Push-to-talk: hold to record, release to stop
-bind = SUPER, D, exec, ~/.local/bin/oflow-ctl start
-bindr = SUPER, D, exec, ~/.local/bin/oflow-ctl stop
+bind = SUPER, D, exec, ~/.local/bin/oflow-ctl toggle
 ```
 
 Then reload: `hyprctl reload`
@@ -239,7 +249,7 @@ Edit `~/.config/hypr/bindings.conf`, change `SUPER, D` to your preferred key (e.
 ## Architecture
 
 ```
-Audio Recording → Validation → Whisper STT → LLM Cleanup → wtype Output
+Audio Recording → Validation → Whisper STT → LLM Cleanup → one-shot paste (ydotool)
 ```
 
 - **Backend** (`oflow.py`) — Single Python file (~1200 lines) handling audio capture, transcription, and text output
