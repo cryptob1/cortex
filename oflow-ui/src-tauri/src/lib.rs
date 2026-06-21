@@ -11,8 +11,8 @@ use tokio::sync::Mutex;
 #[cfg(not(debug_assertions))]
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-// Only import shell for release builds (sidecar)
-#[cfg(not(debug_assertions))]
+// start_sidecar_backend() uses this in both profiles (debug falls back to it
+// too), so the import must be unconditional.
 use tauri_plugin_shell::ShellExt;
 
 /// Default shortcut key (Copilot key on supported keyboards)
@@ -507,17 +507,22 @@ pub fn run() {
                 .get_webview_window("main")
                 .ok_or("Main window not found")?;
 
-            // Show window on startup (user can hide it if they want)
-            window.show().map_err(|e| {
-                format!("Failed to show window on startup: {}", e)
-            })?;
-
-            // Try to bring window to front
-            window.set_focus().map_err(|e| {
-                format!("Failed to focus window on startup: {}", e)
-            })?;
-
-            log::info!("Window shown and focused");
+            // Start hidden when launched with --hidden (e.g. from autostart):
+            // the app lives in the system tray and is shown on demand. Without
+            // the flag (e.g. user launches oflow manually) show + focus it.
+            let start_hidden = std::env::args().any(|a| a == "--hidden");
+            if start_hidden {
+                let _ = window.hide();
+                log::info!("Started hidden (--hidden); running in tray");
+            } else {
+                window.show().map_err(|e| {
+                    format!("Failed to show window on startup: {}", e)
+                })?;
+                window.set_focus().map_err(|e| {
+                    format!("Failed to focus window on startup: {}", e)
+                })?;
+                log::info!("Window shown and focused");
+            }
 
             // Handle window close - minimize to tray instead of quitting
             let window_handle = window.clone();

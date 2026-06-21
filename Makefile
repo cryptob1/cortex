@@ -108,11 +108,17 @@ lint:
 	@echo "Linting code..."
 	@ruff check .
 
-install: build setup-hotkey setup-waybar setup-waybar-css setup-autostart
+install: build setup-hotkey setup-waybar setup-waybar-css setup-autostart setup-osd
 	@echo "Installing oflow..."
 	@mkdir -p ~/.local/bin
 	@cp oflow-ui/src-tauri/target/release/oflow-ui ~/.local/bin/oflow
 	@chmod +x ~/.local/bin/oflow
+
+setup-osd:
+	@echo "Installing recording overlay (oflow-osd)..."
+	@mkdir -p ~/.local/share/oflow
+	@cp oflow-osd.py ~/.local/share/oflow/oflow-osd.py
+	@echo "Overlay installed (needs: gtk4-layer-shell python-gobject python-cairo)"
 	@echo '#!/bin/bash' > ~/.local/bin/oflow-toggle
 	@echo 'OFLOW_BIN="$$HOME/.local/bin/oflow"' >> ~/.local/bin/oflow-toggle
 	@echo 'WIN_CLASS="oflow-ui"' >> ~/.local/bin/oflow-toggle
@@ -261,16 +267,18 @@ install-oflow-ctl:
 	@echo "oflow-ctl installed"
 
 setup-hotkey: install-oflow-ctl
-	@echo "Setting up Super+D hotkey..."
+	@echo "Setting up oflow hotkeys (F8 push-to-talk + Super+D toggle)..."
 	@if [ -f ~/.config/hypr/bindings.conf ]; then \
 		if grep -q "# Oflow voice dictation" ~/.config/hypr/bindings.conf; then \
 			sed -i '/# Oflow voice dictation/,/^$$/d' ~/.config/hypr/bindings.conf; \
 		fi; \
 		echo "" >> ~/.config/hypr/bindings.conf; \
-		echo "# Oflow voice dictation (toggle: press Super+D to start/stop)" >> ~/.config/hypr/bindings.conf; \
-		echo "bind = SUPER, D, exec, ~/.local/bin/oflow-ctl toggle" >> ~/.config/hypr/bindings.conf; \
+		echo "# Oflow voice dictation" >> ~/.config/hypr/bindings.conf; \
+		echo "# Push-to-talk: hold F8 to record, release to stop & paste" >> ~/.config/hypr/bindings.conf; \
+		echo "bind  = , F8, exec, ~/.local/bin/oflow-ctl start" >> ~/.config/hypr/bindings.conf; \
+		echo "bindr = , F8, exec, ~/.local/bin/oflow-ctl stop" >> ~/.config/hypr/bindings.conf; \
 		hyprctl reload 2>/dev/null || true; \
-		echo "Hotkey configured: Super+D (toggle mode)"; \
+		echo "Hotkey configured: F8 (push-to-talk)"; \
 	else \
 		echo "Hyprland bindings.conf not found"; \
 	fi

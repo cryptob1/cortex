@@ -31,6 +31,7 @@ import queue
 import re
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -94,6 +95,12 @@ SETTINGS_FILE = Path.home() / ".oflow" / "settings.json"
 # Waybar state file (in XDG_RUNTIME_DIR for fast access)
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "oflow"
 STATE_FILE = RUNTIME_DIR / "state"
+
+# On-screen recording overlay (oflow-osd.py): datagram socket for live levels
+OSD_SOCK = RUNTIME_DIR / "osd.sock"
+OSD_LEVEL_GAIN = 6.0  # scale raw mic peak (~0..0.2 for speech) toward 0..1
+# gtk4-layer-shell must be LD_PRELOADed (linker-order quirk) for the overlay
+GTK4_LAYER_SHELL_LIB = "/usr/lib/libgtk4-layer-shell.so"
 
 # API key format validation
 OPENAI_API_KEY_PATTERN = re.compile(r"^sk-")
@@ -190,6 +197,9 @@ def load_settings() -> dict:
                     "iconTheme": settings.get("iconTheme", "nerd-font"),
                     "enableSpokenPunctuation": settings.get("enableSpokenPunctuation", False),
                     "wordReplacements": settings.get("wordReplacements", {}),
+                    "pauseMediaWhileRecording": settings.get("pauseMediaWhileRecording", True),
+                    "enableOverlay": settings.get("enableOverlay", True),
+                    "submitKeywords": settings.get("submitKeywords", SUBMIT_KEYWORDS_DEFAULT),
                 }
     except json.JSONDecodeError as e:
         logger.error(f"❌ Settings file is invalid JSON: {e}")
@@ -822,7 +832,9 @@ async def transcribe_audio(
 
     if provider == "groq":
         url = GROQ_WHISPER_URL
-        model = "whisper-large-v3-turbo"
+        # distil-whisper is Groq's fastest model (English-only), ~2x faster than
+        # large-v3-turbo with minimal accuracy loss for English dictation.
+        model = os.getenv("OFLOW_WHISPER_MODEL", "distil-whisper-large-v3-en")
     else:
         url = OPENAI_WHISPER_URL
         model = "whisper-1"
@@ -942,6 +954,39 @@ _TERMINAL_WINDOW_HINTS = (
 _KEY_LEFTCTRL = "29"
 _KEY_LEFTSHIFT = "42"
 _KEY_V = "47"
+_KEY_ENTER = "28"
+
+# Spoken commands that, when said at the very end of a dictation, make oflow
+# press Enter after pasting (handy for submitting prompts/chats). The keyword
+# itself is stripped from the output. Configurable via the "submitKeywords"
+# setting. Note: a dictation that genuinely ends with one of these words will
+# also submit — use a more distinctive phrase (e.g. "submit") if that bites.
+SUBMIT_KEYWORDS_DEFAULT = ["enter", "submit"]
+
+
+def extract_submit_keyword(text: str, keywords: list[str]) -> tuple[str, bool]:
+    """If *text* ends with a submit keyword, strip it and return (text, True)."""
+    if not text or not keywords:
+        return text, False
+    kws = "|".join(re.escape(k) for k in keywords if k)
+    if not kws:
+        return text, False
+    m = re.search(rf"\b(?:{kws})\b[\s.!?,;:'\"]*$", text, re.IGNORECASE)
+    if m:
+        return text[: m.start()].rstrip().rstrip(",.;:"), True
+    return text, False
+
+
+def press_enter() -> None:
+    """Press the Enter key via ydotool (e.g. to submit a prompt after pasting)."""
+    try:
+        subprocess.run(
+            ["ydotool", "key", f"{_KEY_ENTER}:1", f"{_KEY_ENTER}:0"],
+            check=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        logger.info("Pressed Enter (submit keyword)")
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"press_enter failed (ydotool): {e}")
 
 
 def _paste_chord() -> list[str]:
@@ -1094,6 +1139,15 @@ class VoiceDictationServer:
         self._running = True
         self.is_recording = False
         self._recording_lock = threading.Lock()
+        # MPRIS players we paused for the current recording (resumed on stop)
+        self._paused_players: list[str] = []
+        # On-screen recording overlay process + level-send socket
+        self._osd_proc: subprocess.Popen | None = None
+        try:
+            self._osd_send_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            self._osd_send_sock.setblocking(False)
+        except OSError:
+            self._osd_send_sock = None
         # Bounded queue: max 3000 chunks = ~300 seconds (5 minutes) at 10 chunks/sec (prevents memory leak)
         self.audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=3000)
         self.audio_data: list[np.ndarray] = []
@@ -1186,6 +1240,15 @@ class VoiceDictationServer:
                 pass
             self._warn_stream_distress("Audio queue full, discarding oldest data")
 
+        # Feed the on-screen overlay a normalized level (best-effort, non-blocking)
+        if self._osd_send_sock is not None:
+            try:
+                peak = float(np.abs(indata).max())
+                level = min(1.0, peak * OSD_LEVEL_GAIN)
+                self._osd_send_sock.sendto(struct.pack("<f", level), str(OSD_SOCK))
+            except (OSError, ValueError):
+                pass
+
     def _warn_stream_distress(self, message: str):
         """Rate-limited warning for audio stream issues to avoid log spam."""
         now = time.monotonic()
@@ -1221,6 +1284,87 @@ class VoiceDictationServer:
 
         release_pid_lock()
 
+    def _osd_script(self) -> str | None:
+        """Locate oflow-osd.py (next to this file, or installed alongside)."""
+        candidates = [
+            Path(__file__).resolve().parent / "oflow-osd.py",
+            Path.home() / ".local" / "share" / "oflow" / "oflow-osd.py",
+        ]
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        return None
+
+    def _start_osd(self):
+        """Spawn the on-screen recording overlay (best-effort)."""
+        if self._osd_proc is not None and self._osd_proc.poll() is None:
+            return  # already showing
+        script = self._osd_script()
+        if not script:
+            return
+        env = dict(os.environ)
+        # gtk4-layer-shell must be preloaded before libwayland-client
+        preload = env.get("LD_PRELOAD", "")
+        if GTK4_LAYER_SHELL_LIB not in preload:
+            env["LD_PRELOAD"] = (
+                f"{GTK4_LAYER_SHELL_LIB}:{preload}" if preload else GTK4_LAYER_SHELL_LIB
+            )
+        try:
+            self._osd_proc = subprocess.Popen(
+                ["/usr/bin/python3", script],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except (OSError, ValueError) as e:
+            logger.debug(f"Failed to start overlay: {e}")
+            self._osd_proc = None
+
+    def _stop_osd(self):
+        """Tell the overlay to fade out and exit (it also idle-times-out)."""
+        if self._osd_send_sock is not None:
+            try:
+                self._osd_send_sock.sendto(b"stop", str(OSD_SOCK))
+            except OSError:
+                pass
+        self._osd_proc = None
+
+    def _pause_media(self):
+        """Pause any currently-playing MPRIS media players (music, video) so
+        the dictation mic isn't competing with audio. Only players that were
+        actually Playing are remembered, and only those are resumed later.
+        Best-effort: silently no-ops if playerctl is missing or fails."""
+        self._paused_players = []
+        try:
+            players = subprocess.run(
+                ["playerctl", "-l"], capture_output=True, text=True, timeout=2
+            ).stdout.split()
+        except (subprocess.SubprocessError, FileNotFoundError, OSError):
+            return
+        for player in players:
+            try:
+                status = subprocess.run(
+                    ["playerctl", "-p", player, "status"],
+                    capture_output=True, text=True, timeout=2,
+                ).stdout.strip()
+                if status == "Playing":
+                    subprocess.run(["playerctl", "-p", player, "pause"], timeout=2)
+                    self._paused_players.append(player)
+            except (subprocess.SubprocessError, OSError):
+                continue
+        if self._paused_players:
+            logger.info(f"Paused media players for recording: {self._paused_players}")
+
+    def _resume_media(self):
+        """Resume the MPRIS players we paused in _pause_media."""
+        for player in self._paused_players:
+            try:
+                subprocess.run(["playerctl", "-p", player, "play"], timeout=2)
+            except (subprocess.SubprocessError, OSError):
+                continue
+        self._paused_players = []
+
     def _start_recording(self):
         """Start recording audio."""
         with self._recording_lock:
@@ -1247,6 +1391,14 @@ class VoiceDictationServer:
                     enable_punctuation=settings.get("enableSpokenPunctuation", False),
                     replacements=settings.get("wordReplacements", {}),
                 )
+
+                # Show the on-screen recording overlay
+                if settings.get("enableOverlay", True):
+                    self._start_osd()
+
+                # Pause any playing music/video so it doesn't bleed into the mic
+                if settings.get("pauseMediaWhileRecording", True):
+                    self._pause_media()
 
                 # Watchdog auto-stops a stuck recording so a missed key-up
                 # cannot leave the stream open and leak indefinitely.
@@ -1313,6 +1465,8 @@ class VoiceDictationServer:
                 pass
             self.stream = None
         self.audio_data = []
+        self._resume_media()
+        self._stop_osd()
         try:
             self.waybar_state.idle()
         except Exception:
@@ -1347,15 +1501,16 @@ class VoiceDictationServer:
 
         start = time.perf_counter()
 
-        # Keep recording flag ON during the grace period so callback
-        # continues queueing audio. This prevents cutting off the end.
-        time.sleep(0.15)
+        # Keep recording flag ON for a short grace period so the callback
+        # captures the trailing audio. With push-to-talk you release when done,
+        # so this is kept small to minimize stop->paste latency.
+        time.sleep(0.06)
 
         with self._recording_lock:
             self.is_recording = False
 
-        # Small additional delay to let any in-flight callback complete
-        time.sleep(0.05)
+        # Tiny delay to let any in-flight callback complete
+        time.sleep(0.03)
 
         # Stop and close the audio stream
         if self.stream is not None:
@@ -1365,6 +1520,11 @@ class VoiceDictationServer:
             except Exception:
                 pass
             self.stream = None
+
+        # Resume any media we paused, now that the mic is closed
+        self._resume_media()
+        # Dismiss the recording overlay
+        self._stop_osd()
 
         # Drain remaining audio from queue
         while not self.audio_queue.empty():
@@ -1440,7 +1600,18 @@ class VoiceDictationServer:
             raw_text = await transcribe_audio_chunked(client, audio, api_key, provider)
             t1 = time.perf_counter()
 
+            # A trailing "enter"/"submit" makes oflow press Enter after pasting.
+            submit = False
+            submit_keywords = settings.get("submitKeywords", SUBMIT_KEYWORDS_DEFAULT)
+            if raw_text and submit_keywords:
+                raw_text, submit = extract_submit_keyword(raw_text, submit_keywords)
+
             if not raw_text:
+                if submit:
+                    # User said only "enter" -> just press Enter, nothing to paste
+                    press_enter()
+                    self.waybar_state.idle()
+                    return
                 logger.error(
                     "❌ Transcription produced no text. "
                     "See log above for the reason "
@@ -1464,8 +1635,11 @@ class VoiceDictationServer:
             else:
                 cleaned_text = raw_text
 
-            # Type the result
+            # Type the result, then submit (press Enter) if requested
             type_text(cleaned_text)
+            if submit:
+                time.sleep(0.05)  # let the paste land before Enter
+                press_enter()
             logger.info(f"Result: {cleaned_text[:50]}...")
 
             # Set waybar back to idle
