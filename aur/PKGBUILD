@@ -21,10 +21,8 @@ _appimage="oflow_${pkgver}_amd64.AppImage"
 source=("${_appimage}::${url}/releases/download/v${pkgver}/${_appimage}"
         "${_pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
 noextract=("${_appimage}")
-# TODO: replace SKIP with real sums once the v0.2.0 release AppImage is built:
-#   updpkgsums   (or: sha256sum oflow_0.2.0_amd64.AppImage)
-sha256sums=('SKIP'
-            'SKIP')
+sha256sums=('84c574e82fedae75405cf8aed9cc6bb7112041187e51ab484daf7af7f5074d57'
+            '91309ec4f0f9d77915a6dd97abb291426cf93d94c9b96fa23d4dcbe5d6e61f11')
 
 prepare() {
     chmod +x "${_appimage}"
