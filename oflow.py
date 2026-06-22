@@ -134,6 +134,10 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 # Default settings (can be overridden by settings.json)
 DEFAULT_ENABLE_CLEANUP = os.getenv("ENABLE_CLEANUP", "true").lower() == "true"
 DEFAULT_PROVIDER = os.getenv("PROVIDER", "groq")  # Default to Groq (faster)
+# Fast mode: dictations with at most this many words skip the cleanup LLM hop.
+# 0 disables (always clean). 8 covers short commands/replies where the ~200ms
+# cleanup latency is most felt and least needed.
+DEFAULT_FAST_MODE_MAX_WORDS = 8
 
 
 def ensure_data_dir() -> None:
@@ -205,6 +209,7 @@ def load_settings() -> dict:
                     "enableOverlay": settings.get("enableOverlay", True),
                     "submitKeywords": settings.get("submitKeywords", SUBMIT_KEYWORDS_DEFAULT),
                     "enableSpokenActions": settings.get("enableSpokenActions", True),
+                    "fastModeMaxWords": settings.get("fastModeMaxWords", DEFAULT_FAST_MODE_MAX_WORDS),
                 }
     except json.JSONDecodeError as e:
         logger.error(f"❌ Settings file is invalid JSON: {e}")
@@ -933,6 +938,18 @@ async def transcribe_audio_chunked(
     # Join non-empty results with spaces
     texts = [r.strip() for r in results if r.strip()]
     return " ".join(texts)
+
+
+def should_skip_cleanup(text: str, max_words: int) -> bool:
+    """Fast mode: short dictations skip the cleanup LLM round-trip (~200ms).
+
+    Cleanup earns its keep on longer text; on a handful of words it rarely
+    changes anything and the latency is most felt. max_words <= 0 disables fast
+    mode (always clean).
+    """
+    if max_words <= 0:
+        return False
+    return len(text.split()) <= max_words
 
 
 async def cleanup_text(client: httpx.AsyncClient, text: str, api_key: str, provider: str) -> str:
@@ -1817,6 +1834,7 @@ class VoiceDictationServer:
         api_key = settings.get("groqApiKey") if provider == "groq" else settings.get("openaiApiKey")
         enable_cleanup = settings.get("enableCleanup", True)
         enable_actions = settings.get("enableSpokenActions", True)
+        fast_max_words = settings.get("fastModeMaxWords", DEFAULT_FAST_MODE_MAX_WORDS)
 
         if not api_key:
             error_msg = f"❌ {provider.capitalize()} API key not set. Configure it in Settings."
@@ -1881,14 +1899,20 @@ class VoiceDictationServer:
         # Apply text processing (spoken punctuation, replacements)
         raw_text = self.text_processor.process(raw_text)
 
-        # Cleanup (if enabled)
-        if enable_cleanup:
+        # Cleanup (if enabled) — fast mode skips it on short dictations.
+        skip_for_speed = should_skip_cleanup(raw_text, fast_max_words)
+        if enable_cleanup and not skip_for_speed:
             t0 = time.perf_counter()
             cleaned_text = await cleanup_text(client, raw_text, api_key, provider)
             t1 = time.perf_counter()
             logger.info(f"Cleanup: {(t1 - t0) * 1000:.0f}ms")
         else:
             cleaned_text = raw_text
+            if enable_cleanup and skip_for_speed:
+                logger.info(
+                    f"Fast mode: skipped cleanup ({len(raw_text.split())} words "
+                    f"<= {fast_max_words})"
+                )
 
         # Output: run spoken-action commands as real keystrokes (default), or
         # paste-and-optionally-submit on the legacy path.

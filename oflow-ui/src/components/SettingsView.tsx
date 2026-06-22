@@ -32,6 +32,7 @@ export function SettingsView() {
     const [apiKeyInput, setApiKeyInput] = useState("");
     const [groqKeyInput, setGroqKeyInput] = useState("");
     const [submitKeywordsInput, setSubmitKeywordsInput] = useState("press enter, hit enter");
+    const [fastWordsInput, setFastWordsInput] = useState("8");
 
     useEffect(() => {
         const load = async () => {
@@ -48,6 +49,9 @@ export function SettingsView() {
                 if (loadedSettings.submitKeywords && loadedSettings.submitKeywords.length) {
                     setSubmitKeywordsInput(loadedSettings.submitKeywords.join(", "));
                 }
+                if (typeof loadedSettings.fastModeMaxWords === "number" && loadedSettings.fastModeMaxWords > 0) {
+                    setFastWordsInput(String(loadedSettings.fastModeMaxWords));
+                }
             } catch (error) {
                 console.error("Failed to load settings:", error);
             } finally {
@@ -57,7 +61,7 @@ export function SettingsView() {
         load();
     }, []);
 
-    const handleSettingChange = async (key: keyof Settings, value: boolean | string | string[]) => {
+    const handleSettingChange = async (key: keyof Settings, value: boolean | string | string[] | number) => {
         const newSettings = { ...settings, [key]: value };
         setSettings(newSettings);
 
@@ -73,6 +77,13 @@ export function SettingsView() {
     const handleSaveSubmitKeywords = async () => {
         const phrases = submitKeywordsInput.split(",").map(s => s.trim()).filter(Boolean);
         await handleSettingChange("submitKeywords", phrases);
+    };
+
+    const handleSaveFastWords = async () => {
+        const n = parseInt(fastWordsInput, 10);
+        const clamped = Number.isFinite(n) && n > 0 ? n : 8;
+        setFastWordsInput(String(clamped));
+        await handleSettingChange("fastModeMaxWords", clamped);
     };
 
     const handleClearHistory = async () => {
@@ -278,6 +289,33 @@ export function SettingsView() {
                                 disabled={isLoading}
                             />
                         </div>
+
+                        <div className={`flex items-center justify-between space-x-2 ${settings.enableCleanup ? '' : 'opacity-50'}`}>
+                            <div className="space-y-1">
+                                <Label htmlFor="fastmode">Fast mode</Label>
+                                <p className="text-sm text-muted-foreground">Skip AI cleanup on short dictations (≤ {settings.fastModeMaxWords ?? 8} words) for instant output. Saves ~200&nbsp;ms.</p>
+                            </div>
+                            <Switch
+                                id="fastmode"
+                                checked={(settings.fastModeMaxWords ?? 8) > 0}
+                                onCheckedChange={(c) => handleSettingChange("fastModeMaxWords", c ? (parseInt(fastWordsInput, 10) || 8) : 0)}
+                                disabled={isLoading || !settings.enableCleanup}
+                            />
+                        </div>
+
+                        {settings.enableCleanup && (settings.fastModeMaxWords ?? 8) > 0 && (
+                            <div className="space-y-2">
+                                <Label htmlFor="fastwords">Fast mode word limit</Label>
+                                <p className="text-sm text-muted-foreground">Dictations with this many words or fewer skip cleanup.</p>
+                                <div className="flex gap-2">
+                                    <Input id="fastwords" type="number" min={1} className="w-24"
+                                        value={fastWordsInput}
+                                        onChange={(e) => setFastWordsInput(e.target.value)}
+                                        disabled={isLoading} />
+                                    <Button onClick={handleSaveFastWords} disabled={isLoading}>Save</Button>
+                                </div>
+                            </div>
+                        )}
                     </CardContent>
                 </Card>
 

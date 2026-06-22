@@ -17,6 +17,7 @@ export interface Settings {
     pauseMediaWhileRecording?: boolean;
     enableSpokenPunctuation?: boolean;
     enableSpokenActions?: boolean;
+    fastModeMaxWords?: number;
     audioFeedbackTheme?: string;
     submitKeywords?: string[];
 }

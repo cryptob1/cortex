@@ -110,3 +110,36 @@ class TestInterleaved:
         segs = segment_spoken_actions("press tab username")
         assert kinds(segs) == ["key", "text"]
         assert texts(segs) == ["username"]
+
+
+from oflow import should_skip_cleanup, DEFAULT_FAST_MODE_MAX_WORDS
+
+
+class TestFastModeCleanupSkip:
+    @pytest.mark.unit
+    def test_short_text_skips(self):
+        assert should_skip_cleanup("open the pull request", 8) is True
+
+    @pytest.mark.unit
+    def test_exactly_threshold_skips(self):
+        assert should_skip_cleanup("one two three four five six seven eight", 8) is True
+
+    @pytest.mark.unit
+    def test_over_threshold_cleans(self):
+        assert should_skip_cleanup("one two three four five six seven eight nine", 8) is False
+
+    @pytest.mark.unit
+    def test_zero_disables_fast_mode(self):
+        assert should_skip_cleanup("hi", 0) is False
+
+    @pytest.mark.unit
+    def test_negative_disables_fast_mode(self):
+        assert should_skip_cleanup("hi", -1) is False
+
+    @pytest.mark.unit
+    def test_empty_text_skips(self):
+        assert should_skip_cleanup("", 8) is True
+
+    @pytest.mark.unit
+    def test_default_threshold_is_sane(self):
+        assert DEFAULT_FAST_MODE_MAX_WORDS == 8
