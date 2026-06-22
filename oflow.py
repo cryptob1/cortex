@@ -1225,13 +1225,15 @@ def type_text(text: str) -> None:
 # the command words are consumed (not typed). The wake word is fuzzy-matched
 # because Whisper renders the coined word "oflow" inconsistently, and it is
 # user-configurable (commandWakeWord).
-DEFAULT_WAKE_WORD = "oflow"
+DEFAULT_WAKE_WORD = "jarvis"
 
-# Plausible Whisper transcriptions of "oflow" that are also unlikely to appear
-# right before a command word in ordinary speech. Used only for the default wake
-# word; a custom wake word is matched literally (case-insensitive). Tune after
-# hearing what Whisper actually produces.
-_OFLOW_WAKE_VARIANTS = ["oflow", "oflo", "o flow", "oh flow", "off flow"]
+# Fuzzy variants for coined wake words Whisper renders inconsistently. Real
+# words and names (jarvis, computer) transcribe deterministically, so they're
+# matched literally; only words listed here get the variant treatment. "oflow"
+# scatters into "of flow / for flow / a flow", which is why it's not the default.
+_WAKE_VARIANTS = {
+    "oflow": ["oflow", "oflo", "o flow", "oh flow", "off flow"],
+}
 
 # Each action: "action" is "keys" (send chords) or "scratch" (delete last output).
 SPOKEN_ACTIONS = [
@@ -1249,9 +1251,9 @@ SPOKEN_ACTIONS = [
 
 
 def _wake_pattern(wake_word: str) -> str:
-    """Regex fragment matching the wake word (fuzzy for the default 'oflow')."""
+    """Regex fragment matching the wake word (fuzzy only for coined words)."""
     word = (wake_word or DEFAULT_WAKE_WORD).strip()
-    alts = _OFLOW_WAKE_VARIANTS if word.lower() == DEFAULT_WAKE_WORD else [word]
+    alts = _WAKE_VARIANTS.get(word.lower(), [word])
     return "(?:" + "|".join(r"\s+".join(re.escape(w) for w in a.split()) for a in alts) + ")"
 
 
@@ -1743,6 +1745,9 @@ class VoiceDictationServer:
                     enable_punctuation=settings.get("enableSpokenPunctuation", False),
                     replacements=settings.get("wordReplacements", {}),
                 )
+                # Pick up audio-feedback changes live (e.g. turning sounds off)
+                self.audio_feedback.theme = settings.get("audioFeedbackTheme", "default")
+                self.audio_feedback.volume = max(0.0, min(1.0, settings.get("audioFeedbackVolume", 0.3)))
 
                 # Show the on-screen recording overlay
                 if settings.get("enableOverlay", True):

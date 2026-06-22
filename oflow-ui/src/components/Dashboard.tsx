@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Activity, Clock, FileText, Loader2 } from "lucide-react";
-import { getTranscriptStats, getTranscripts, type Transcript } from "@/lib/api";
+import { Activity, Clock, FileText, Loader2, Mic } from "lucide-react";
+import { getTranscriptStats, getTranscripts, loadSettings, type Transcript } from "@/lib/api";
 
 export function Dashboard() {
     const [stats, setStats] = useState({
@@ -11,24 +11,29 @@ export function Dashboard() {
     });
     const [recentTranscripts, setRecentTranscripts] = useState<Transcript[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [wakeWord, setWakeWord] = useState("jarvis");
+    const [commandsOn, setCommandsOn] = useState(true);
 
     useEffect(() => {
         const loadData = async () => {
             setIsLoading(true);
             try {
-                const [statsData, transcripts] = await Promise.all([
+                const [statsData, transcripts, settings] = await Promise.all([
                     getTranscriptStats(),
-                    getTranscripts()
+                    getTranscripts(),
+                    loadSettings(),
                 ]);
                 setStats(statsData);
                 setRecentTranscripts(transcripts.slice(0, 5));
+                setWakeWord((settings.commandWakeWord || "jarvis").trim() || "jarvis");
+                setCommandsOn(settings.enableSpokenActions ?? true);
             } catch (error) {
                 console.error("Failed to load dashboard data:", error);
             } finally {
                 setIsLoading(false);
             }
         };
-        
+
         loadData();
     }, []);
 
@@ -67,6 +72,19 @@ export function Dashboard() {
                 <h2 className="text-3xl font-bold tracking-tight">Dashboard</h2>
                 <p className="text-muted-foreground">Overview of your voice transcription activity.</p>
             </div>
+
+            {commandsOn && (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
+                    <span className="flex items-center gap-2 font-medium">
+                        <Mic className="h-4 w-4 text-primary" />
+                        Wake word:
+                        <code className="rounded bg-primary/15 px-2 py-0.5 font-mono text-primary">{wakeWord}</code>
+                    </span>
+                    <span className="text-sm text-muted-foreground">
+                        say <span className="font-mono">"{wakeWord} enter"</span> · <span className="font-mono">"{wakeWord} scratch that"</span> · <span className="font-mono">"{wakeWord} select all"</span>
+                    </span>
+                </div>
+            )}
 
             <div className="grid gap-4 md:grid-cols-3">
                 <Card>

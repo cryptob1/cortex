@@ -38,8 +38,8 @@ export function SettingsView() {
     const [groqKeyInput, setGroqKeyInput] = useState("");
     const [submitKeywordsInput, setSubmitKeywordsInput] = useState("press enter, hit enter");
     const [fastWordsInput, setFastWordsInput] = useState("8");
-    const [wakeWordInput, setWakeWordInput] = useState("oflow");
-    const wakeWord = (settings.commandWakeWord || "oflow").trim() || "oflow";
+    const [wakeWordInput, setWakeWordInput] = useState("jarvis");
+    const wakeWord = (settings.commandWakeWord || "jarvis").trim() || "jarvis";
 
     useEffect(() => {
         const load = async () => {
@@ -97,7 +97,7 @@ export function SettingsView() {
     };
 
     const handleSaveWakeWord = async () => {
-        const w = wakeWordInput.trim().toLowerCase() || "oflow";
+        const w = wakeWordInput.trim().toLowerCase() || "jarvis";
         setWakeWordInput(w);
         await handleSettingChange("commandWakeWord", w);
     };
@@ -406,11 +406,11 @@ export function SettingsView() {
 
                         <div className={`space-y-2 ${(settings.enableSpokenActions ?? true) ? '' : 'opacity-50'}`}>
                             <Label htmlFor="wakeword">Wake word</Label>
-                            <p className="text-sm text-muted-foreground">Every command starts with this word, so normal speech is never mistaken for a command. Default “oflow”; pick something Whisper hears reliably.</p>
+                            <p className="text-sm text-muted-foreground">Every command starts with this word, so normal speech is never mistaken for a command. Default “jarvis” (Whisper transcribes names reliably); pick any word it hears cleanly.</p>
                             <div className="flex gap-2">
                                 <Input id="wakeword" className="w-40" value={wakeWordInput}
                                     onChange={(e) => setWakeWordInput(e.target.value)}
-                                    placeholder="oflow" disabled={isLoading || !(settings.enableSpokenActions ?? true)} />
+                                    placeholder="jarvis" disabled={isLoading || !(settings.enableSpokenActions ?? true)} />
                                 <Button onClick={handleSaveWakeWord} disabled={isLoading || !(settings.enableSpokenActions ?? true)}>Save</Button>
                             </div>
                         </div>

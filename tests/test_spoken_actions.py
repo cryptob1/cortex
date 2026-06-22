@@ -1,4 +1,4 @@
-"""Unit tests for wake-word voice commands ("oflow <command>" -> keystroke)."""
+"""Unit tests for wake-word voice commands ("jarvis <command>" -> keystroke)."""
 
 import os
 import sys
@@ -55,11 +55,11 @@ class TestNoCommand:
 
     @pytest.mark.unit
     def test_wake_word_alone_is_text(self):
-        assert segment_spoken_actions("oflow") == [("text", "oflow")]
+        assert segment_spoken_actions("jarvis") == [("text", "jarvis")]
 
     @pytest.mark.unit
     def test_wake_word_not_followed_by_command_is_text(self):
-        text = "oflow is a voice tool"
+        text = "jarvis is a marvel character"
         assert segment_spoken_actions(text) == [("text", text)]
 
     @pytest.mark.unit
@@ -71,69 +71,64 @@ class TestNoCommand:
 class TestSingleCommands:
     @pytest.mark.unit
     def test_enter(self):
-        segs = segment_spoken_actions("oflow enter")
+        segs = segment_spoken_actions("jarvis enter")
         assert kinds(segs) == ["key"]
         assert keyseqs(segs)[0] == [_tap(_KEY_ENTER)]
 
     @pytest.mark.unit
     def test_new_line(self):
-        assert keyseqs(segment_spoken_actions("oflow new line"))[0] == [_tap(_KEY_ENTER)]
+        assert keyseqs(segment_spoken_actions("jarvis new line"))[0] == [_tap(_KEY_ENTER)]
 
     @pytest.mark.unit
     def test_new_paragraph_two_enters(self):
-        assert keyseqs(segment_spoken_actions("oflow new paragraph"))[0] == [_tap(_KEY_ENTER), _tap(_KEY_ENTER)]
+        assert keyseqs(segment_spoken_actions("jarvis new paragraph"))[0] == [_tap(_KEY_ENTER), _tap(_KEY_ENTER)]
 
     @pytest.mark.unit
     def test_send_it_is_enter(self):
-        assert keyseqs(segment_spoken_actions("oflow send it"))[0] == [_tap(_KEY_ENTER)]
+        assert keyseqs(segment_spoken_actions("jarvis send it"))[0] == [_tap(_KEY_ENTER)]
 
     @pytest.mark.unit
     def test_tab(self):
-        assert keyseqs(segment_spoken_actions("oflow tab"))[0] == [_tap(_KEY_TAB)]
+        assert keyseqs(segment_spoken_actions("jarvis tab"))[0] == [_tap(_KEY_TAB)]
 
     @pytest.mark.unit
     def test_escape(self):
-        assert keyseqs(segment_spoken_actions("oflow escape"))[0] == [_tap(_KEY_ESC)]
+        assert keyseqs(segment_spoken_actions("jarvis escape"))[0] == [_tap(_KEY_ESC)]
 
     @pytest.mark.unit
     def test_select_all(self):
-        assert keyseqs(segment_spoken_actions("oflow select all"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_A)]
+        assert keyseqs(segment_spoken_actions("jarvis select all"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_A)]
 
     @pytest.mark.unit
     def test_undo(self):
-        assert keyseqs(segment_spoken_actions("oflow undo"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_Z)]
+        assert keyseqs(segment_spoken_actions("jarvis undo"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_Z)]
 
     @pytest.mark.unit
     def test_undo_that_consumes_that(self):
         # "undo that" must win over "undo" so "that" isn't left as text.
-        segs = segment_spoken_actions("oflow undo that")
+        segs = segment_spoken_actions("jarvis undo that")
         assert kinds(segs) == ["key"]
         assert keyseqs(segs)[0] == [_chord(_KEY_LEFTCTRL, _KEY_Z)]
 
     @pytest.mark.unit
     def test_redo(self):
-        assert keyseqs(segment_spoken_actions("oflow redo"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_LEFTSHIFT, _KEY_Z)]
+        assert keyseqs(segment_spoken_actions("jarvis redo"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_LEFTSHIFT, _KEY_Z)]
 
     @pytest.mark.unit
     def test_delete_word(self):
-        assert keyseqs(segment_spoken_actions("oflow delete word"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_BACKSPACE)]
+        assert keyseqs(segment_spoken_actions("jarvis delete word"))[0] == [_chord(_KEY_LEFTCTRL, _KEY_BACKSPACE)]
 
     @pytest.mark.unit
     def test_scratch_that_is_scratch_segment(self):
-        segs = segment_spoken_actions("oflow scratch that")
+        segs = segment_spoken_actions("jarvis scratch that")
         assert kinds(segs) == ["scratch"]
 
     @pytest.mark.unit
     def test_case_insensitive(self):
-        assert kinds(segment_spoken_actions("OFLOW Enter")) == ["key"]
+        assert kinds(segment_spoken_actions("JARVIS Enter")) == ["key"]
 
 
-class TestFuzzyWakeWord:
-    @pytest.mark.unit
-    @pytest.mark.parametrize("variant", ["oflow", "oflo", "o flow", "oh flow", "off flow"])
-    def test_variants_trigger(self, variant):
-        assert kinds(segment_spoken_actions(f"{variant} enter")) == ["key"]
-
+class TestWakeWordConfig:
     @pytest.mark.unit
     def test_custom_wake_word(self):
         segs = segment_spoken_actions("computer enter", wake_word="computer")
@@ -141,50 +136,57 @@ class TestFuzzyWakeWord:
 
     @pytest.mark.unit
     def test_default_wake_inactive_when_custom_set(self):
-        # With a custom wake word, "oflow enter" is just text.
-        assert segment_spoken_actions("oflow enter", wake_word="computer") == [("text", "oflow enter")]
+        # With a custom wake word, the default "jarvis enter" is just text.
+        assert segment_spoken_actions("jarvis enter", wake_word="computer") == [("text", "jarvis enter")]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("variant", ["oflow", "oflo", "o flow", "oh flow", "off flow"])
+    def test_oflow_fuzzy_variants_when_configured(self, variant):
+        # "oflow" is a coined word Whisper scatters, so it keeps fuzzy variants
+        # when a user explicitly chooses it.
+        assert kinds(segment_spoken_actions(f"{variant} enter", wake_word="oflow")) == ["key"]
 
 
 class TestInterleaved:
     @pytest.mark.unit
     def test_command_between_text(self):
-        segs = segment_spoken_actions("go to settings oflow new line click save")
+        segs = segment_spoken_actions("go to settings jarvis new line click save")
         assert kinds(segs) == ["text", "key", "text"]
         assert texts(segs) == ["go to settings", "click save"]
 
     @pytest.mark.unit
     def test_trailing_command_trims_space(self):
-        segs = segment_spoken_actions("save the file oflow enter")
+        segs = segment_spoken_actions("save the file jarvis enter")
         assert kinds(segs) == ["text", "key"]
         assert texts(segs) == ["save the file"]
 
     @pytest.mark.unit
     def test_orphan_punctuation_after_command_dropped(self):
-        segs = segment_spoken_actions("do it oflow enter.")
+        segs = segment_spoken_actions("do it jarvis enter.")
         assert kinds(segs) == ["text", "key"]
         assert texts(segs) == ["do it"]
 
     @pytest.mark.unit
     def test_multiple_commands(self):
-        segs = segment_spoken_actions("first oflow new line second oflow new line third")
+        segs = segment_spoken_actions("first jarvis new line second jarvis new line third")
         assert kinds(segs) == ["text", "key", "text", "key", "text"]
         assert texts(segs) == ["first", "second", "third"]
 
     @pytest.mark.unit
     def test_leading_command(self):
-        segs = segment_spoken_actions("oflow tab username")
+        segs = segment_spoken_actions("jarvis tab username")
         assert kinds(segs) == ["key", "text"]
         assert texts(segs) == ["username"]
 
     @pytest.mark.unit
     def test_comma_after_wake_word_still_fires(self):
-        # Cleanup LLM often writes "Oflow, scratch that".
-        assert kinds(segment_spoken_actions("Oflow, scratch that")) == ["scratch"]
+        # Cleanup LLM often writes "Jarvis, scratch that".
+        assert kinds(segment_spoken_actions("Jarvis, scratch that")) == ["scratch"]
 
     @pytest.mark.unit
     def test_period_after_wake_does_not_cross_sentence(self):
-        # "...love oflow. Select all of them..." must NOT fire select-all.
-        text = "I love oflow. Select all of them are great"
+        # "...thanks Jarvis. Select all of them..." must NOT fire select-all.
+        text = "thanks Jarvis. Select all of them are great"
         assert segment_spoken_actions(text) == [("text", text)]
 
 
@@ -216,4 +218,4 @@ class TestFastModeCleanupSkip:
     @pytest.mark.unit
     def test_defaults_are_sane(self):
         assert DEFAULT_FAST_MODE_MAX_WORDS == 8
-        assert DEFAULT_WAKE_WORD == "oflow"
+        assert DEFAULT_WAKE_WORD == "jarvis"

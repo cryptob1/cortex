@@ -38,7 +38,7 @@ N_BARS = 42
 IDLE_TIMEOUT_US = 2_000_000  # exit if no packet for 2s (backend died / missed stop)
 FPS_MS = 16  # ~60fps
 
-DEFAULT_WAKE_WORD = "oflow"
+DEFAULT_WAKE_WORD = "jarvis"
 # Rotating hints shown under the meter. {w} is the configured wake word, so the
 # overlay always teaches the trigger word and a couple of commands while you talk.
 TIP_TEMPLATES = [

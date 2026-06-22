@@ -23,7 +23,7 @@ Built for **Wayland**, **Hyprland**, and **Omarchy**. Open source, transcripts s
 - **One-shot paste** — Pastes the whole result at once (via ydotool), not char-by-char
 - **On-screen overlay** — Live recording level meter at the bottom of the screen
 - **Pauses your media** — Auto-pauses playing music/video while you dictate, resumes after
-- **Voice commands** — Say "oflow scratch that", "oflow select all", "oflow enter" and oflow presses the real keys ([see below](#-voice-commands))
+- **Voice commands** — Say "jarvis scratch that", "jarvis select all", "jarvis enter" and oflow presses the real keys ([see below](#-voice-commands))
 - **Fast mode** — Skips AI cleanup on short dictations for instant output
 - **Smart cleanup** — Auto-fixes grammar, removes filler words, formats text
 - **Waybar integration** — Click status icon to open settings, visual feedback while recording
@@ -108,21 +108,21 @@ Hold F8 → Speak → Release → Text appears in active window
 
 ## 🎙️ Voice commands
 
-Dictation is more than typing — say **"oflow"** followed by a command and oflow presses the real keys, anywhere in a sentence:
+Dictation is more than typing — say **"jarvis"** followed by a command and oflow presses the real keys, anywhere in a sentence:
 
 | Say… | …and oflow does |
 |------|-----------------|
-| **"oflow scratch that"** | deletes your last dictation — the magic undo |
-| **"oflow enter"** / **"oflow send it"** | presses Enter (submit a chat or prompt) |
-| **"oflow new line"** / **"oflow new paragraph"** | inserts a real line break |
-| **"oflow select all"** | Ctrl+A |
-| **"oflow undo"** / **"oflow redo"** | Ctrl+Z / Ctrl+Shift+Z |
-| **"oflow delete word"** | deletes the previous word |
-| **"oflow tab"** / **"oflow escape"** | Tab / Esc |
+| **"jarvis scratch that"** | deletes your last dictation — the magic undo |
+| **"jarvis enter"** / **"jarvis send it"** | presses Enter (submit a chat or prompt) |
+| **"jarvis new line"** / **"jarvis new paragraph"** | inserts a real line break |
+| **"jarvis select all"** | Ctrl+A |
+| **"jarvis undo"** / **"jarvis redo"** | Ctrl+Z / Ctrl+Shift+Z |
+| **"jarvis delete word"** | deletes the previous word |
+| **"jarvis tab"** / **"jarvis escape"** | Tab / Esc |
 
-**Why the wake word?** Requiring **"oflow"** first is what makes it safe: ordinary speech like *"select all the files"* stays literal text — only *"oflow select all"* fires the command. So you never have to think about whether a phrase will be misread.
+**Why the wake word?** Requiring **"jarvis"** first is what makes it safe: ordinary speech like *"select all the files"* stays literal text — only *"jarvis select all"* fires the command. So you never have to think about whether a phrase will be misread.
 
-The wake word is configurable in **Settings → Spoken Commands** (default `oflow`), and the recording overlay rotates a hint each time so the commands are easy to discover.
+The wake word is configurable in **Settings → Spoken Commands** (default `jarvis` — a name Whisper transcribes reliably; pick any word it hears cleanly), and the recording overlay rotates a hint each time so the commands are easy to discover.
 
 ## Tech Stack
 
