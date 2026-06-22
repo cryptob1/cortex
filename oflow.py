@@ -87,6 +87,10 @@ STREAM_WARN_INTERVAL_SECONDS = 5.0  # Throttle audio-stream distress warnings
 
 # API configuration
 API_TIMEOUT_SECONDS = 30.0  # Timeout for API requests
+# How long an idle keep-alive socket may be reused before it's recycled. Kept
+# below typical server/NAT idle timeouts so we don't try to send on a socket the
+# other end has already dropped (e.g. after laptop suspend/resume).
+KEEPALIVE_EXPIRY_SECONDS = 45.0
 
 # File paths
 TRANSCRIPTS_FILE = Path.home() / ".oflow" / "transcripts.jsonl"
@@ -200,6 +204,7 @@ def load_settings() -> dict:
                     "pauseMediaWhileRecording": settings.get("pauseMediaWhileRecording", True),
                     "enableOverlay": settings.get("enableOverlay", True),
                     "submitKeywords": settings.get("submitKeywords", SUBMIT_KEYWORDS_DEFAULT),
+                    "enableSpokenActions": settings.get("enableSpokenActions", True),
                 }
     except json.JSONDecodeError as e:
         logger.error(f"❌ Settings file is invalid JSON: {e}")
@@ -815,6 +820,40 @@ def is_hallucination(text: str) -> bool:
     return False
 
 
+# A pooled keep-alive connection can be closed under us by the server, an idle
+# NAT/firewall timeout, or a laptop suspend/resume. httpx does NOT auto-retry
+# POST, so without this a single dead socket would fail an otherwise-fine
+# dictation. Re-sending is safe: re-transcribing the same audio or re-running
+# cleanup has no harmful side effect. We retry once, on a fresh connection.
+_RETRYABLE_POST_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+)
+
+
+async def _post_with_retry(
+    client: httpx.AsyncClient, url: str, *, retries: int = 1, **kwargs
+) -> httpx.Response:
+    """POST that retries once on a transient connection failure.
+
+    Guards the persistent (keep-alive) client against stale sockets. Only
+    connection-level errors are retried; HTTP error *responses* (401, 5xx) are
+    returned to the caller unchanged, exactly as a plain client.post would.
+    """
+    for attempt in range(retries + 1):
+        try:
+            return await client.post(url, **kwargs)
+        except _RETRYABLE_POST_ERRORS as e:
+            if attempt >= retries:
+                raise
+            logger.warning(
+                f"POST {url} failed ({type(e).__name__}); retrying on a fresh connection"
+            )
+
+
 async def transcribe_audio(
     client: httpx.AsyncClient, audio: np.ndarray, api_key: str, provider: str
 ) -> str:
@@ -840,7 +879,8 @@ async def transcribe_audio(
         model = "whisper-1"
 
     try:
-        response = await client.post(
+        response = await _post_with_retry(
+            client,
             url,
             headers={"Authorization": f"Bearer {api_key}"},
             files={"file": ("audio.wav", wav_bytes, "audio/wav")},
@@ -908,7 +948,8 @@ async def cleanup_text(client: httpx.AsyncClient, text: str, api_key: str, provi
         model = "gpt-4o-mini"
 
     try:
-        response = await client.post(
+        response = await _post_with_retry(
+            client,
             url,
             headers={"Authorization": f"Bearer {api_key}"},
             json={
@@ -955,6 +996,12 @@ _KEY_LEFTCTRL = "29"
 _KEY_LEFTSHIFT = "42"
 _KEY_V = "47"
 _KEY_ENTER = "28"
+_KEY_TAB = "15"
+_KEY_ESC = "1"
+
+# A "tap" of a single key = press then release, as ydotool 'key' args.
+def _tap(code: str) -> list[str]:
+    return [f"{code}:1", f"{code}:0"]
 
 # Spoken commands that, when said at the very end of a dictation, make oflow
 # press Enter after pasting (handy for submitting prompts/chats). The keyword
@@ -1142,6 +1189,122 @@ def type_text(text: str) -> None:
 
 
 # ============================================================================
+# Spoken Actions (say a command, oflow presses the real key)
+# ============================================================================
+#
+# Unlike spoken *punctuation* (which inserts a character like "." or "\n"),
+# spoken *actions* send a real keystroke through ydotool — so "new line" in a
+# chat box submits-then-newlines exactly as if you pressed Enter, and "press
+# tab" moves between form fields. Actions can appear anywhere in a dictation,
+# not just at the end, and the spoken phrase is removed from the typed text.
+#
+# Phrases are deliberately two words. A bare "enter"/"tab" appears in ordinary
+# speech ("the data you enter", "keep tabs on it"); a two-word imperative like
+# "press enter" almost never does, which is what keeps this from misfiring.
+SPOKEN_ACTIONS = [
+    {"phrases": ["new paragraph"], "label": "¶", "keys": [_tap(_KEY_ENTER), _tap(_KEY_ENTER)]},
+    {"phrases": ["new line", "next line"], "label": "↵", "keys": [_tap(_KEY_ENTER)]},
+    {"phrases": ["press enter", "hit enter"], "label": "↵", "keys": [_tap(_KEY_ENTER)]},
+    {"phrases": ["press tab", "tab key"], "label": "⇥", "keys": [_tap(_KEY_TAB)]},
+    {"phrases": ["press escape", "escape key"], "label": "⎋", "keys": [_tap(_KEY_ESC)]},
+]
+
+
+def _build_action_pattern(specs: list[dict]) -> re.Pattern | None:
+    """Compile one regex matching any action phrase, tagging which spec hit."""
+    parts = []
+    for i, spec in enumerate(specs):
+        alts = [r"\s+".join(re.escape(w) for w in ph.split()) for ph in spec["phrases"]]
+        parts.append(f"(?P<a{i}>" + "|".join(alts) + ")")
+    if not parts:
+        return None
+    return re.compile(r"\b(?:" + "|".join(parts) + r")\b", re.IGNORECASE)
+
+
+def segment_spoken_actions(
+    text: str, specs: list[dict] = SPOKEN_ACTIONS
+) -> list[tuple]:
+    """Split *text* into an ordered list of segments to replay in place.
+
+    Each segment is either ("text", str) or ("key", keys, label). Whitespace and
+    a stray punctuation mark left flush against a removed command are trimmed so
+    "do it, press enter" yields [text "do it"] + [key Enter], not a dangling
+    " ," before the keystroke. Returns a single text segment when no command is
+    present (the overwhelmingly common case), so normal dictation is untouched.
+    """
+    pattern = _build_action_pattern(specs)
+    if not text or pattern is None:
+        return [("text", text)]
+
+    raw_segments: list[tuple] = []
+    pos = 0
+    for m in pattern.finditer(text):
+        if m.start() > pos:
+            raw_segments.append(("text", text[pos:m.start()]))
+        idx = next(i for i in range(len(specs)) if m.group(f"a{i}") is not None)
+        raw_segments.append(("key", specs[idx]["keys"], specs[idx]["label"]))
+        pos = m.end()
+    if pos < len(text):
+        raw_segments.append(("text", text[pos:]))
+
+    if not any(seg[0] == "key" for seg in raw_segments):
+        return [("text", text)]
+
+    # Trim whitespace/orphan punctuation at text↔key boundaries.
+    cleaned: list[tuple] = []
+    for i, seg in enumerate(raw_segments):
+        if seg[0] != "text":
+            cleaned.append(seg)
+            continue
+        s = seg[1]
+        if i > 0 and raw_segments[i - 1][0] == "key":
+            s = s.lstrip(" \t.,;:!?")  # drop a mark stranded after a command
+        if i + 1 < len(raw_segments) and raw_segments[i + 1][0] == "key":
+            s = s.rstrip(" \t")
+        if s:
+            cleaned.append(("text", s))
+    return cleaned or [("text", "")]
+
+
+def _send_keys(key_chords: list[list[str]]) -> None:
+    """Send one or more key taps via ydotool (e.g. Enter, or Enter+Enter)."""
+    for chord in key_chords:
+        try:
+            subprocess.run(
+                ["ydotool", "key", *chord],
+                check=True, stderr=subprocess.DEVNULL, timeout=5,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning(f"_send_keys failed (ydotool): {e}")
+            return
+        time.sleep(0.01)
+
+
+def output_with_actions(text: str) -> None:
+    """Type *text*, executing any spoken-action commands as real keystrokes.
+
+    Fast path: when the dictation has no commands, this is a single paste —
+    identical to type_text. With commands, it pastes each text run and presses
+    the requested key between runs, in order.
+    """
+    segments = segment_spoken_actions(text)
+    if len(segments) == 1 and segments[0][0] == "text":
+        type_text(segments[0][1])
+        return
+    for kind, *rest in segments:
+        if kind == "text":
+            run = rest[0]
+            if run:
+                type_text(run)
+                time.sleep(0.03)  # let the paste land before the next keystroke
+        else:
+            keys, label = rest
+            _send_keys(keys)
+            logger.info(f"Spoken action: {label}")
+            time.sleep(0.03)
+
+
+# ============================================================================
 # Voice Dictation Server
 # ============================================================================
 
@@ -1210,29 +1373,77 @@ class VoiceDictationServer:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
-        # Pre-warm HTTP connection
+        # One persistent asyncio loop + HTTP client for the whole server life.
+        # Reusing the client keeps the TLS/HTTP connection to the API warm
+        # between dictations, removing a ~100-250ms handshake from every one.
+        # The client is created on, and only ever touched from, this loop's
+        # thread — an httpx.AsyncClient is bound to its event loop, so the old
+        # "asyncio.run() per dictation" model could never have reused it safely.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
+        self._client: httpx.AsyncClient | None = None
+        self._start_async_loop()
+
         settings = load_settings()
         provider = settings.get("provider", "groq")
         if provider == "groq":
             logger.info("oflow Ready (Groq - optimized mode)")
-            asyncio.run(self._prewarm_connection())
+            self._schedule_on_loop(self._prewarm_connection())
         else:
             logger.info("oflow Ready (OpenAI Whisper + GPT-4o-mini)")
 
+    def _start_async_loop(self):
+        """Spin up the persistent event loop (background thread) + HTTP client."""
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, daemon=True, name="oflow-async"
+        )
+        self._loop_thread.start()
+        # Create the client on the loop thread so it binds to the right loop.
+        asyncio.run_coroutine_threadsafe(self._init_client(), self._loop).result(timeout=5)
+
+    async def _init_client(self):
+        """Construct the persistent HTTP client (runs on the loop thread)."""
+        self._client = httpx.AsyncClient(
+            timeout=API_TIMEOUT_SECONDS,
+            limits=httpx.Limits(
+                max_keepalive_connections=4,
+                keepalive_expiry=KEEPALIVE_EXPIRY_SECONDS,
+            ),
+        )
+
+    def _run_on_loop(self, coro):
+        """Run a coroutine on the persistent loop and block for its result."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    def _schedule_on_loop(self, coro):
+        """Fire-and-forget a coroutine on the persistent loop (no blocking)."""
+        if self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except RuntimeError:
+            pass  # loop shutting down
+
     async def _prewarm_connection(self):
-        """Pre-warm HTTP connection to reduce first-request latency."""
+        """Warm the persistent connection so the next request skips the handshake.
+
+        Called at startup and again on key-down, so a keep-alive that expired
+        while idle is refreshed before the user finishes speaking.
+        """
+        if self._client is None:
+            return
         settings = load_settings()
         api_key = settings.get("groqApiKey")
         if not api_key:
             return
-
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.get(
-                    "https://api.groq.com/openai/v1/models",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                )
-            logger.info("Connection pre-warmed")
+            await self._client.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=5.0,
+            )
+            logger.debug("Connection pre-warmed")
         except Exception as e:
             logger.debug(f"Pre-warm failed: {e}")
 
@@ -1293,6 +1504,21 @@ class VoiceDictationServer:
         if os.path.exists(SOCKET_PATH):
             try:
                 os.remove(SOCKET_PATH)
+            except Exception:
+                pass
+
+        # Tear down the persistent loop + client (close the client on its own
+        # loop, then stop the loop so its thread can exit).
+        loop = getattr(self, "_loop", None)
+        if loop is not None:
+            client = getattr(self, "_client", None)
+            if client is not None:
+                try:
+                    asyncio.run_coroutine_threadsafe(client.aclose(), loop).result(timeout=2)
+                except Exception:
+                    pass
+            try:
+                loop.call_soon_threadsafe(loop.stop)
             except Exception:
                 pass
 
@@ -1400,6 +1626,10 @@ class VoiceDictationServer:
 
                 self.waybar_state.recording()
                 self.audio_feedback.play_start()
+
+                # Refresh the kept-warm connection now, while the user speaks,
+                # so a keep-alive that expired during idle is hot by release.
+                self._schedule_on_loop(self._prewarm_connection())
 
                 # Reload settings in case they changed
                 settings = load_settings()
@@ -1555,7 +1785,7 @@ class VoiceDictationServer:
             self.waybar_state.idle()
             return
 
-        asyncio.run(self._process_transcription())
+        self._run_on_loop(self._process_transcription())
         total_ms = (time.perf_counter() - start) * 1000
         logger.info(f"Recording stopped ({total_ms:.0f}ms)")
 
@@ -1586,6 +1816,7 @@ class VoiceDictationServer:
         provider = settings.get("provider", "groq")
         api_key = settings.get("groqApiKey") if provider == "groq" else settings.get("openaiApiKey")
         enable_cleanup = settings.get("enableCleanup", True)
+        enable_actions = settings.get("enableSpokenActions", True)
 
         if not api_key:
             error_msg = f"❌ {provider.capitalize()} API key not set. Configure it in Settings."
@@ -1608,66 +1839,78 @@ class VoiceDictationServer:
             self.waybar_state.idle()
             return
 
-        async with httpx.AsyncClient(timeout=API_TIMEOUT_SECONDS) as client:
-            logger.info(f"Processing {duration:.1f}s audio")
+        # Reuse the persistent, kept-warm client (created on this loop's thread).
+        client = self._client
+        if client is None:  # defensive: loop torn down mid-shutdown
+            self.waybar_state.idle()
+            return
 
-            # Transcribe (auto-chunks long audio for reliability)
-            t0 = time.perf_counter()
-            raw_text = await transcribe_audio_chunked(client, audio, api_key, provider)
-            t1 = time.perf_counter()
+        logger.info(f"Processing {duration:.1f}s audio")
 
-            # A trailing "enter"/"submit" makes oflow press Enter after pasting.
-            submit = False
+        # Transcribe (auto-chunks long audio for reliability)
+        t0 = time.perf_counter()
+        raw_text = await transcribe_audio_chunked(client, audio, api_key, provider)
+        t1 = time.perf_counter()
+
+        # With spoken actions on, "press enter"/"new line"/etc. are handled by
+        # the segmenter below (mid-stream, not just at the end). With it off, we
+        # fall back to the legacy end-of-dictation submit-keyword behavior.
+        submit = False
+        if not enable_actions:
             submit_keywords = settings.get("submitKeywords", SUBMIT_KEYWORDS_DEFAULT)
             if raw_text and submit_keywords:
                 raw_text, submit = extract_submit_keyword(raw_text, submit_keywords)
 
-            if not raw_text:
-                if submit:
-                    # User said only "enter" -> just press Enter, nothing to paste
-                    press_enter()
-                    self.waybar_state.idle()
-                    return
-                logger.error(
-                    "❌ Transcription produced no text. "
-                    "See log above for the reason "
-                    "(filtered as hallucination, empty API response, or auth/network error)."
-                )
-                self.waybar_state.error("No text")
-                self.audio_feedback.play_error()
+        if not raw_text:
+            if submit:
+                # User said only "enter" -> just press Enter, nothing to paste
+                press_enter()
+                self.waybar_state.idle()
                 return
+            logger.error(
+                "❌ Transcription produced no text. "
+                "See log above for the reason "
+                "(filtered as hallucination, empty API response, or auth/network error)."
+            )
+            self.waybar_state.error("No text")
+            self.audio_feedback.play_error()
+            return
 
-            logger.info(f"Transcription: {(t1 - t0) * 1000:.0f}ms | Raw: {raw_text[:80]}")
+        logger.info(f"Transcription: {(t1 - t0) * 1000:.0f}ms | Raw: {raw_text[:80]}")
 
-            # Apply text processing (spoken punctuation, replacements)
-            raw_text = self.text_processor.process(raw_text)
+        # Apply text processing (spoken punctuation, replacements)
+        raw_text = self.text_processor.process(raw_text)
 
-            # Cleanup (if enabled)
-            if enable_cleanup:
-                t0 = time.perf_counter()
-                cleaned_text = await cleanup_text(client, raw_text, api_key, provider)
-                t1 = time.perf_counter()
-                logger.info(f"Cleanup: {(t1 - t0) * 1000:.0f}ms")
-            else:
-                cleaned_text = raw_text
+        # Cleanup (if enabled)
+        if enable_cleanup:
+            t0 = time.perf_counter()
+            cleaned_text = await cleanup_text(client, raw_text, api_key, provider)
+            t1 = time.perf_counter()
+            logger.info(f"Cleanup: {(t1 - t0) * 1000:.0f}ms")
+        else:
+            cleaned_text = raw_text
 
-            # Type the result, then submit (press Enter) if requested
+        # Output: run spoken-action commands as real keystrokes (default), or
+        # paste-and-optionally-submit on the legacy path.
+        if enable_actions:
+            output_with_actions(cleaned_text)
+        else:
             type_text(cleaned_text)
             if submit:
                 time.sleep(0.05)  # let the paste land before Enter
                 press_enter()
-            logger.info(f"Result: {cleaned_text[:50]}...")
+        logger.info(f"Result: {cleaned_text[:50]}...")
 
-            # Set waybar back to idle
-            self.waybar_state.idle()
+        # Set waybar back to idle
+        self.waybar_state.idle()
 
-            # Save transcript
-            storage = StorageManager()
-            storage.save_transcript(
-                raw=raw_text,
-                cleaned=cleaned_text,
-                timestamp=datetime.now().isoformat(),
-            )
+        # Save transcript
+        storage = StorageManager()
+        storage.save_transcript(
+            raw=raw_text,
+            cleaned=cleaned_text,
+            timestamp=datetime.now().isoformat(),
+        )
 
     def run(self):
         """Main server loop."""

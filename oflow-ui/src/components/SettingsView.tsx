@@ -5,8 +5,18 @@ import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { loadSettings, saveSettings, clearHistory, type Settings } from "@/lib/api";
-import { Eye, EyeOff, Shield, Zap } from "lucide-react";
+import { Eye, EyeOff, Shield, Zap, Keyboard } from "lucide-react";
 import { useToast } from "@/components/ui/toast";
+
+// Mirrors SPOKEN_ACTIONS in oflow.py. Shown read-only so users can see what
+// they can say; the backend is the source of truth for what actually fires.
+const SPOKEN_COMMANDS: { say: string; does: string; key: string }[] = [
+    { say: "“new line” / “next line”", does: "Press Enter", key: "↵" },
+    { say: "“new paragraph”", does: "Press Enter twice", key: "¶" },
+    { say: "“press enter” / “hit enter”", does: "Press Enter", key: "↵" },
+    { say: "“press tab” / “tab key”", does: "Press Tab", key: "⇥" },
+    { say: "“press escape” / “escape key”", does: "Press Esc", key: "⎋" },
+];
 
 export function SettingsView() {
     const { showToast } = useToast();
@@ -309,9 +319,9 @@ export function SettingsView() {
                             <Switch id="punct" checked={settings.enableSpokenPunctuation ?? false}
                                 onCheckedChange={(c) => handleSettingChange("enableSpokenPunctuation", c)} disabled={isLoading} />
                         </div>
-                        <div className="space-y-2">
+                        <div className={`space-y-2 ${(settings.enableSpokenActions ?? true) ? 'opacity-50' : ''}`}>
                             <Label htmlFor="submitkw">Submit phrases</Label>
-                            <p className="text-sm text-muted-foreground">Saying one of these at the end presses Enter after pasting (great for prompts). Comma-separated.</p>
+                            <p className="text-sm text-muted-foreground">Legacy: saying one of these at the end presses Enter after pasting. Comma-separated. Only used when <strong>Spoken commands</strong> is off.</p>
                             <div className="flex gap-2">
                                 <Input id="submitkw" value={submitKeywordsInput}
                                     onChange={(e) => setSubmitKeywordsInput(e.target.value)}
@@ -319,6 +329,41 @@ export function SettingsView() {
                                 <Button onClick={handleSaveSubmitKeywords} disabled={isLoading}>Save</Button>
                             </div>
                         </div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Keyboard className="h-5 w-5" />
+                            Spoken Commands
+                        </CardTitle>
+                        <CardDescription>Say a command mid-dictation and oflow presses the real key.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <div className="flex items-center justify-between space-x-2">
+                            <div className="space-y-1">
+                                <Label htmlFor="actions">Enable spoken commands</Label>
+                                <p className="text-sm text-muted-foreground">Turn the phrases below into real keystrokes (Enter, Tab, Esc). Needs ydotool.</p>
+                            </div>
+                            <Switch id="actions" checked={settings.enableSpokenActions ?? true}
+                                onCheckedChange={(c) => handleSettingChange("enableSpokenActions", c)} disabled={isLoading} />
+                        </div>
+
+                        <div className={`rounded-lg border divide-y ${(settings.enableSpokenActions ?? true) ? '' : 'opacity-50'}`}>
+                            {SPOKEN_COMMANDS.map((cmd) => (
+                                <div key={cmd.say} className="flex items-center justify-between gap-3 px-3 py-2">
+                                    <span className="text-sm">{cmd.say}</span>
+                                    <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                                        {cmd.does}
+                                        <kbd className="px-2 py-0.5 rounded bg-muted font-mono text-foreground">{cmd.key}</kbd>
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                            Two-word phrases are used on purpose, so ordinary speech like “the data you enter” stays literal text.
+                        </p>
                     </CardContent>
                 </Card>
 

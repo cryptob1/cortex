@@ -16,6 +16,7 @@ export interface Settings {
     enableOverlay?: boolean;
     pauseMediaWhileRecording?: boolean;
     enableSpokenPunctuation?: boolean;
+    enableSpokenActions?: boolean;
     audioFeedbackTheme?: string;
     submitKeywords?: string[];
 }
