@@ -924,7 +924,13 @@ def _elevenlabs_request(wav_bytes: bytes, model: str, auth: dict) -> dict:
     return {
         "headers": auth,
         "files": {"file": ("audio.wav", wav_bytes, "audio/wav")},
-        "data": {"model_id": model, "language_code": STT_LANGUAGE_ISO3},
+        "data": {
+            "model_id": model,
+            "language_code": STT_LANGUAGE_ISO3,
+            # Don't transcribe non-speech sounds (fan, AC, laughter) as bracketed
+            # tags like "(tonal sound)" — we only want the spoken words.
+            "tag_audio_events": "false",
+        },
     }
 
 
