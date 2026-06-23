@@ -289,19 +289,31 @@ install-oflow-ctl:
 	@install -m755 scripts/oflow-ctl ~/.local/bin/oflow-ctl
 	@echo "oflow-ctl installed"
 
+# Push-to-talk hotkey for dictation. Default: the Microsoft Copilot key, which
+# emits Super+Shift+F23 (Hyprland keycode "code:201"). Omarchy binds that combo
+# to its menu by default, so we unbind it first. Override for a keyboard without
+# a Copilot key, e.g.:
+#   make setup-hotkey OFLOW_HOTKEY=", F8" OFLOW_HOTKEY_UNBIND= OFLOW_HOTKEY_LABEL=F8
+OFLOW_HOTKEY ?= SUPER SHIFT, code:201
+OFLOW_HOTKEY_UNBIND ?= SUPER SHIFT, code:201
+OFLOW_HOTKEY_LABEL ?= Copilot key
+
 setup-hotkey: install-oflow-ctl
-	@echo "Setting up oflow hotkeys (F8 push-to-talk + Super+D toggle)..."
+	@echo "Setting up oflow hotkey ($(OFLOW_HOTKEY_LABEL) push-to-talk)..."
 	@if [ -f ~/.config/hypr/bindings.conf ]; then \
 		if grep -q "# Oflow voice dictation" ~/.config/hypr/bindings.conf; then \
 			sed -i '/# Oflow voice dictation/,/^$$/d' ~/.config/hypr/bindings.conf; \
 		fi; \
 		echo "" >> ~/.config/hypr/bindings.conf; \
 		echo "# Oflow voice dictation" >> ~/.config/hypr/bindings.conf; \
-		echo "# Push-to-talk: hold F8 to record, release to stop & paste" >> ~/.config/hypr/bindings.conf; \
-		echo "bind  = , F8, exec, ~/.local/bin/oflow-ctl start" >> ~/.config/hypr/bindings.conf; \
-		echo "bindr = , F8, exec, ~/.local/bin/oflow-ctl stop" >> ~/.config/hypr/bindings.conf; \
+		echo "# Push-to-talk: hold the $(OFLOW_HOTKEY_LABEL) to record, release to stop & paste" >> ~/.config/hypr/bindings.conf; \
+		if [ -n "$(OFLOW_HOTKEY_UNBIND)" ]; then \
+			echo "unbind = $(OFLOW_HOTKEY_UNBIND)" >> ~/.config/hypr/bindings.conf; \
+		fi; \
+		echo "bindd = $(OFLOW_HOTKEY), Oflow dictation (hold to talk), exec, ~/.local/bin/oflow-ctl start" >> ~/.config/hypr/bindings.conf; \
+		echo "bindr = $(OFLOW_HOTKEY), exec, ~/.local/bin/oflow-ctl stop" >> ~/.config/hypr/bindings.conf; \
 		hyprctl reload 2>/dev/null || true; \
-		echo "Hotkey configured: F8 (push-to-talk)"; \
+		echo "Hotkey configured: $(OFLOW_HOTKEY_LABEL) (push-to-talk)"; \
 	else \
 		echo "Hyprland bindings.conf not found"; \
 	fi

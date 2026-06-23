@@ -1,13 +1,13 @@
 # oflow — Wispr Flow–grade Voice Typing for Linux, Powered by Groq
 
 **The most accurate voice‑to‑text dictation on Linux — and it's effectively free.**
-Hold **F8**, speak, release: your words are transcribed and pasted into any app — your editor, terminal, browser, or an AI chat prompt.
+Hold the **Copilot key**, speak, release: your words are transcribed and pasted into any app — your editor, terminal, browser, or an AI chat prompt.
 
 <!--
   ⭐ DEMO GIF — this is the single biggest driver of GitHub stars. Record a ~5s clip
-  (hold F8 → overlay appears → speak → text pastes), save it to docs/demo.gif, and
+  (hold the Copilot key → overlay appears → speak → text pastes), save it to docs/demo.gif, and
   uncomment the line below:
-  <p align="center"><img src="docs/demo.gif" alt="oflow — hold F8, speak, and your words paste into any app" width="640"></p>
+  <p align="center"><img src="docs/demo.gif" alt="oflow — hold the Copilot key, speak, and your words paste into any app" width="640"></p>
 -->
 
 oflow is like [Voxtype](https://voxtype.io) or [Wispr Flow](https://wisprflow.ai), but instead of running a *small* Whisper model on your laptop, it transcribes with **[Groq](https://groq.com)'s hosted Whisper `large‑v3‑turbo`** — the *full*, accurate model, in ~0.5s, with **no GPU, no 3 GB of resident RAM, and no model setup**. Local dictation forces a trade between fast‑but‑inaccurate and accurate‑but‑slow; Groq breaks it.
@@ -19,7 +19,7 @@ Built for **Wayland**, **Hyprland**, and **Omarchy**. Open source, transcripts s
 ## Features
 
 - **Instant transcription** — Groq Whisper (`whisper-large-v3-turbo`), ~0.6s latency
-- **Push-to-talk** — Hold **F8** to record, release to stop & paste
+- **Push-to-talk** — Hold the **Copilot key** to record, release to stop & paste
 - **One-shot paste** — Pastes the whole result at once (via ydotool), not char-by-char
 - **On-screen overlay** — Live recording level meter at the bottom of the screen
 - **Pauses your media** — Auto-pauses playing music/video while you dictate, resumes after
@@ -52,7 +52,7 @@ Most open‑source Linux dictation tools (Voxtype, nerd‑dictation, numen) run 
 curl -fsSL https://raw.githubusercontent.com/cryptob1/oflow/master/install.sh | bash
 ```
 
-Installs everything — dependencies, the app, the **F8** hotkey, the recording overlay, the paste daemon, and autostart. Then paste a free [Groq API key](https://console.groq.com/keys) and hold **F8** to talk.
+Installs everything — dependencies, the app, the **Copilot-key** hotkey, the recording overlay, the paste daemon, and autostart. Then paste a free [Groq API key](https://console.groq.com/keys) and hold the **Copilot key** to talk.
 
 ### …or have Claude Code (or any AI agent) install it for you
 
@@ -65,7 +65,7 @@ this Arch/Omarchy machine:
 2. Make sure the ydotoold user service is enabled (systemctl --user enable --now ydotool.service).
 3. Then ask me for my Groq API key (https://console.groq.com/keys), write it to
    ~/.oflow/settings.json as "groqApiKey", and restart oflow.
-4. Tell me to hold F8 to dictate.
+4. Tell me to hold the Copilot key to dictate.
 ```
 
 That's the whole setup, hands‑off — the agent installs everything and wires in your key.
@@ -91,14 +91,14 @@ cd ~/code/oflow && make install
 ## Setup (10 seconds)
 
 1. Click the `󰍬` mic icon in Waybar (or the tray) → **Settings** → paste a free [Groq API key](https://console.groq.com/keys).
-2. **Hold F8**, speak, release — your words paste wherever you're typing.
+2. **Hold the Copilot key**, speak, release — your words paste wherever you're typing.
 
 > **Tip:** end a dictation with **"press enter"** to submit — great for firing off AI prompts hands‑free.
 
 ## How It Works
 
 ```
-Hold F8 → Speak → Release → Text appears in active window
+Hold the Copilot key → Speak → Release → Text appears in active window
 ```
 
 | You say | You get |
@@ -139,7 +139,7 @@ If you're an AI agent installing oflow on an Arch/Omarchy machine, just run the 
 curl -fsSL https://raw.githubusercontent.com/cryptob1/oflow/master/install.sh | bash
 ```
 
-It installs all dependencies, builds the app, and sets up the F8 hotkey, the overlay, the `ydotoold` paste daemon, and autostart. Afterward, tell the user to paste a free Groq API key (https://console.groq.com/keys) in **Settings** (tray/Waybar mic icon) and **hold F8** to dictate. Push‑to‑talk: hold F8 to record, release to stop, transcribe, and paste. End a sentence with "press enter" to also submit.
+It installs all dependencies, builds the app, and sets up the Copilot-key hotkey, the overlay, the `ydotoold` paste daemon, and autostart. Afterward, tell the user to paste a free Groq API key (https://console.groq.com/keys) in **Settings** (tray/Waybar mic icon) and **hold the Copilot key** to dictate. Push‑to‑talk: hold the Copilot key to record, release to stop, transcribe, and paste. End a sentence with "press enter" to also submit.
 
 ## Build from Source
 
@@ -167,7 +167,7 @@ make install  # Full install: build app, setup hotkey, Waybar & autostart
 This will:
 1. Build the Tauri app
 2. Install `oflow` and `oflow-ctl` to `~/.local/bin/`
-3. Configure **F8** push-to-talk hotkey
+3. Configure **Copilot-key** push-to-talk hotkey
 4. Add Waybar status indicator with colored icons (green/red/yellow)
 5. Enable autostart on login
 6. Launch oflow
@@ -219,7 +219,7 @@ make uninstall
 This removes:
 - All binaries from `~/.local/bin/` (oflow, oflow-ctl, oflow-toggle)
 - Waybar module and CSS styling
-- Hyprland hotkey binding (F8 push-to-talk)
+- Hyprland hotkey binding (Copilot-key push-to-talk)
 - Autostart entry
 - Settings directory (`~/.oflow/`)
 - Runtime files and sockets
@@ -254,15 +254,24 @@ Settings are stored in `~/.oflow/settings.json`:
 
 ## Hotkey Configuration
 
-### Default: Push-to-Talk (F8)
+### Default: Push-to-Talk (Copilot key)
 
-**Hold F8** to record, release to stop, transcribe, and paste.
+**Hold the Copilot key** to record, release to stop, transcribe, and paste. The
+Copilot key emits `Super+Shift+F23` (Hyprland keycode `code:201`); Omarchy binds
+that to its menu by default, so the installer unbinds it first.
 
 The hotkey is configured automatically during `make install` in `~/.config/hypr/bindings.conf`:
 
 ```ini
-bind  = , F8, exec, ~/.local/bin/oflow-ctl start
-bindr = , F8, exec, ~/.local/bin/oflow-ctl stop
+unbind = SUPER SHIFT, code:201
+bindd = SUPER SHIFT, code:201, Oflow dictation (hold to talk), exec, ~/.local/bin/oflow-ctl start
+bindr = SUPER SHIFT, code:201, exec, ~/.local/bin/oflow-ctl stop
+```
+
+On a keyboard without a Copilot key, override the hotkey at install time:
+
+```bash
+make setup-hotkey OFLOW_HOTKEY=", F8" OFLOW_HOTKEY_UNBIND= OFLOW_HOTKEY_LABEL=F8
 ```
 
 ### Alternative: Toggle Mode

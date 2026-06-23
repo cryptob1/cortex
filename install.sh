@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/cryptob1/oflow/master/install.sh | bash
 #
-# Installs dependencies, builds oflow, sets up the F8 hotkey, the recording
+# Installs dependencies, builds oflow, sets up the Copilot-key hotkey, the recording
 # overlay, the ydotool paste daemon, and autostart. Arch / Omarchy.
 set -euo pipefail
 
@@ -43,7 +43,7 @@ cat <<'DONE'
 
   1. Click the  󰍬  mic icon in Waybar (or the tray) → paste a free Groq API key
      from https://console.groq.com/keys
-  2. Hold  F8 , speak, release — your words paste into whatever you're typing.
+  2. Hold the  Copilot key , speak, release — your words paste into whatever you're typing.
 
   Tip: end a dictation with "press enter" to submit (great for AI prompts).
 DONE
