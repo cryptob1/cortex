@@ -1472,7 +1472,9 @@ SPOKEN_ACTIONS = [
     {"phrases": ["scratch that", "delete that"], "action": "scratch", "label": "⌫ scratch"},
     {"phrases": ["new paragraph"], "action": "keys", "label": "¶ paragraph", "keys": [_tap(_KEY_ENTER), _tap(_KEY_ENTER)]},
     {"phrases": ["new line", "next line"], "action": "keys", "label": "↵ new line", "keys": [_tap(_KEY_ENTER)]},
-    {"phrases": ["enter", "return", "send it", "send", "submit"], "action": "keys", "label": "↵ enter", "keys": [_tap(_KEY_ENTER)]},
+    # "answer"/"inter" are common ASR mishearings of "enter" — safe to alias since
+    # they only fire right after the wake word, which you only say to give a command.
+    {"phrases": ["enter", "return", "send it", "send", "submit", "answer", "inter"], "action": "keys", "label": "↵ enter", "keys": [_tap(_KEY_ENTER)]},
     {"phrases": ["tab"], "action": "keys", "label": "⇥ tab", "keys": [_tap(_KEY_TAB)]},
     {"phrases": ["escape", "cancel"], "action": "keys", "label": "⎋ escape", "keys": [_tap(_KEY_ESC)]},
     {"phrases": ["select all"], "action": "keys", "label": "select all", "keys": [_chord(_KEY_LEFTCTRL, _KEY_A)]},
