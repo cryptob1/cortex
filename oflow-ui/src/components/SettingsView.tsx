@@ -208,6 +208,22 @@ export function SettingsView() {
         }
     };
 
+    const HOTKEY_LABELS: Record<NonNullable<Settings['dictationHotkey']>, string> = {
+        copilot: 'Copilot key', f8: 'F8',
+    };
+
+    const handleHotkeyChange = async (dictationHotkey: NonNullable<Settings['dictationHotkey']>) => {
+        const newSettings = { ...settings, dictationHotkey };
+        setSettings(newSettings);
+        try {
+            await saveSettings(newSettings);
+            showToast(`Hotkey set to ${HOTKEY_LABELS[dictationHotkey]} — applying…`, "success");
+        } catch (error) {
+            console.error("Failed to save hotkey:", error);
+            showToast("Failed to change hotkey", "error");
+        }
+    };
+
     return (
         <div className="space-y-6">
             <div>
@@ -430,6 +446,48 @@ export function SettingsView() {
                                 Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="underline">platform.openai.com</a>
                             </p>
                         </div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle>Dictation Hotkey</CardTitle>
+                        <CardDescription>The push-to-talk key — hold to record, release to transcribe & paste.</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="grid grid-cols-2 gap-3">
+                            <button
+                                onClick={() => handleHotkeyChange('copilot')}
+                                className={`p-4 rounded-lg border-2 text-left transition-all ${
+                                    (settings.dictationHotkey ?? 'copilot') === 'copilot'
+                                        ? 'border-primary bg-primary/5'
+                                        : 'border-muted hover:border-muted-foreground/50'
+                                }`}
+                                disabled={isLoading}
+                            >
+                                <div className="font-medium">Copilot key</div>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                    The dedicated Copilot key (Super+Shift+F23)
+                                </p>
+                            </button>
+                            <button
+                                onClick={() => handleHotkeyChange('f8')}
+                                className={`p-4 rounded-lg border-2 text-left transition-all ${
+                                    settings.dictationHotkey === 'f8'
+                                        ? 'border-primary bg-primary/5'
+                                        : 'border-muted hover:border-muted-foreground/50'
+                                }`}
+                                disabled={isLoading}
+                            >
+                                <div className="font-medium">F8</div>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                    Function key — works on any keyboard
+                                </p>
+                            </button>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-3">
+                            Applies to Hyprland within a couple seconds. Requires Omarchy/Hyprland.
+                        </p>
                     </CardContent>
                 </Card>
 

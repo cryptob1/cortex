@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# oflow-hotkey — set the dictation push-to-talk hotkey in Hyprland.
+#
+#   oflow-hotkey [copilot|f8]
+#
+# Rewrites the "# Oflow voice dictation" block in ~/.config/hypr/bindings.conf
+# and reloads Hyprland. Idempotent: re-running replaces the existing block.
+set -euo pipefail
+
+CHOICE="${1:-copilot}"
+CONF="${HYPR_BINDINGS:-$HOME/.config/hypr/bindings.conf}"
+
+case "$CHOICE" in
+  copilot)
+    # Microsoft Copilot key = Super+Shift+F23 (Hyprland keycode code:201).
+    # Omarchy binds that to its menu by default, so unbind it first.
+    BIND="SUPER SHIFT, code:201"; UNBIND="SUPER SHIFT, code:201"; LABEL="Copilot key" ;;
+  f8)
+    BIND=", F8"; UNBIND=""; LABEL="F8" ;;
+  *)
+    echo "oflow-hotkey: unknown hotkey '$CHOICE' (use 'copilot' or 'f8')" >&2; exit 1 ;;
+esac
+
+[ -f "$CONF" ] || { echo "oflow-hotkey: $CONF not found (Hyprland only)" >&2; exit 1; }
+
+# Drop any existing oflow block (its comment line through the next blank line).
+if grep -q "# Oflow voice dictation" "$CONF"; then
+  sed -i '/# Oflow voice dictation/,/^$/d' "$CONF"
+fi
+
+{
+  echo ""
+  echo "# Oflow voice dictation"
+  echo "# Push-to-talk: hold the $LABEL to record, release to stop & paste"
+  [ -n "$UNBIND" ] && echo "unbind = $UNBIND"
+  echo "bindd = $BIND, Oflow dictation (hold to talk), exec, ~/.local/bin/oflow-ctl start"
+  echo "bindr = $BIND, exec, ~/.local/bin/oflow-ctl stop"
+} >> "$CONF"
+
+hyprctl reload >/dev/null 2>&1 || true
+echo "oflow hotkey set to: $LABEL"

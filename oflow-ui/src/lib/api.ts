@@ -15,6 +15,7 @@ export interface Settings {
     elevenlabsApiKey?: string;
     deepgramApiKey?: string;
     provider?: 'openai' | 'groq' | 'elevenlabs' | 'deepgram';
+    dictationHotkey?: 'copilot' | 'f8';
     enableOverlay?: boolean;
     pauseMediaWhileRecording?: boolean;
     enableSpokenPunctuation?: boolean;

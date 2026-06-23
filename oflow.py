@@ -153,6 +153,7 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 # Default settings (can be overridden by settings.json)
 DEFAULT_ENABLE_CLEANUP = os.getenv("ENABLE_CLEANUP", "true").lower() == "true"
 DEFAULT_PROVIDER = os.getenv("PROVIDER", "groq")  # Default to Groq (faster)
+DEFAULT_DICTATION_HOTKEY = "copilot"  # push-to-talk key: "copilot" or "f8"
 # Fast mode: dictations with at most this many words skip the cleanup LLM hop.
 # 0 disables (always clean). 19 (i.e. under 20 words) covers most short/medium
 # dictations where the ~200ms cleanup latency is most felt and least needed —
@@ -222,6 +223,7 @@ def load_settings() -> dict:
                     "elevenlabsApiKey": settings.get("elevenlabsApiKey") or ELEVENLABS_API_KEY,
                     "deepgramApiKey": settings.get("deepgramApiKey") or DEEPGRAM_API_KEY,
                     "provider": settings.get("provider", DEFAULT_PROVIDER),
+                    "dictationHotkey": settings.get("dictationHotkey", DEFAULT_DICTATION_HOTKEY),
                     "audioFeedbackTheme": settings.get("audioFeedbackTheme", "default"),
                     "audioFeedbackVolume": settings.get("audioFeedbackVolume", 0.3),
                     "iconTheme": settings.get("iconTheme", "nerd-font"),
@@ -247,12 +249,37 @@ def load_settings() -> dict:
         "elevenlabsApiKey": ELEVENLABS_API_KEY,
         "deepgramApiKey": DEEPGRAM_API_KEY,
         "provider": DEFAULT_PROVIDER,
+        "dictationHotkey": DEFAULT_DICTATION_HOTKEY,
         "audioFeedbackTheme": "default",
         "audioFeedbackVolume": 0.3,
         "iconTheme": "nerd-font",
         "enableSpokenPunctuation": False,
         "wordReplacements": {},
     }
+
+
+HOTKEY_SCRIPT = Path.home() / ".local" / "bin" / "oflow-hotkey"
+
+
+def apply_dictation_hotkey(choice: str) -> None:
+    """Bind the push-to-talk hotkey via the oflow-hotkey helper (Hyprland).
+
+    Best-effort: no-op if the helper or Hyprland isn't present, so this is safe
+    on non-Hyprland setups.
+    """
+    if not HOTKEY_SCRIPT.exists():
+        return
+    try:
+        subprocess.run(
+            [str(HOTKEY_SCRIPT), choice],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+        logger.info(f"Dictation hotkey applied: {choice}")
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug(f"Could not apply hotkey: {e}")
 
 
 # ============================================================================
@@ -778,6 +805,27 @@ AI_RESPONSE_STARTS = [
 ]
 
 
+# We force English transcription, but accurate models (ElevenLabs Scribe) treat
+# the language code as a hint and still auto-switch on short/ambiguous audio —
+# producing e.g. Bengali or Devanagari script for English speech. When English is
+# the target, drop output dominated by non-Latin letters: it's a misrecognition,
+# not something the user wants pasted.
+_ENGLISH_TARGET = STT_LANGUAGE.lower().startswith("en")
+
+
+def is_wrong_language(text: str) -> bool:
+    """True if English is the target but the text is mostly non-Latin script."""
+    if not _ENGLISH_TARGET:
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 4:
+        return False
+    # Latin (incl. accents) lives below U+0250; other scripts (Bengali, CJK,
+    # Cyrillic, Arabic, Devanagari, …) sit above it.
+    non_latin = sum(1 for c in letters if ord(c) >= 0x250)
+    return non_latin / len(letters) > 0.3
+
+
 def is_hallucination(text: str) -> bool:
     """Check if text is likely a Whisper hallucination or AI response.
 
@@ -1085,6 +1133,9 @@ async def transcribe_audio(
         if response.status_code == 200:
             text = cfg.parse_response(response.json())
             if is_hallucination(text):
+                return ""
+            if is_wrong_language(text):
+                logger.info(f"Filtered non-English transcription: {text[:80]}")
                 return ""
             return text
         elif response.status_code == 401:
@@ -1677,6 +1728,36 @@ class VoiceDictationServer:
             cu_provider, _ = resolve_cleanup_provider(settings, provider, get_provider_key(settings, provider))
             if cu_provider:
                 logger.info(f"LLM cleanup will use {get_stt_provider(cu_provider).label}")
+
+        # Keep the Hyprland push-to-talk binding in sync with the chosen hotkey,
+        # applying it now and whenever the setting changes in the UI.
+        self._applied_hotkey: str | None = None
+        self._start_hotkey_watcher()
+
+    def _start_hotkey_watcher(self):
+        """Apply the configured hotkey now, then watch settings.json for changes."""
+        self._sync_hotkey()
+        threading.Thread(target=self._hotkey_watch_loop, daemon=True, name="oflow-hotkey").start()
+
+    def _sync_hotkey(self):
+        """Apply the hotkey if the setting differs from what's currently bound."""
+        choice = load_settings().get("dictationHotkey", DEFAULT_DICTATION_HOTKEY)
+        if choice != self._applied_hotkey:
+            apply_dictation_hotkey(choice)
+            self._applied_hotkey = choice
+
+    def _hotkey_watch_loop(self):
+        """Re-apply the hotkey shortly after settings.json changes on disk."""
+        last_mtime = 0.0
+        while True:
+            time.sleep(2)
+            try:
+                mtime = SETTINGS_FILE.stat().st_mtime
+            except OSError:
+                continue
+            if mtime != last_mtime:
+                last_mtime = mtime
+                self._sync_hotkey()
 
     def _start_async_loop(self):
         """Spin up the persistent event loop (background thread) + HTTP client."""
