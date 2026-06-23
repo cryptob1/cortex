@@ -12,7 +12,9 @@ export interface Settings {
     enableCleanup: boolean;
     openaiApiKey?: string;
     groqApiKey?: string;
-    provider?: 'openai' | 'groq';
+    elevenlabsApiKey?: string;
+    deepgramApiKey?: string;
+    provider?: 'openai' | 'groq' | 'elevenlabs' | 'deepgram';
     enableOverlay?: boolean;
     pauseMediaWhileRecording?: boolean;
     enableSpokenPunctuation?: boolean;

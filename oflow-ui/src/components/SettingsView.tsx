@@ -34,8 +34,12 @@ export function SettingsView() {
     const [clearStatus, setClearStatus] = useState<"idle" | "clearing">("idle");
     const [showApiKey, setShowApiKey] = useState(false);
     const [showGroqKey, setShowGroqKey] = useState(false);
+    const [showElevenKey, setShowElevenKey] = useState(false);
+    const [showDeepgramKey, setShowDeepgramKey] = useState(false);
     const [apiKeyInput, setApiKeyInput] = useState("");
     const [groqKeyInput, setGroqKeyInput] = useState("");
+    const [elevenKeyInput, setElevenKeyInput] = useState("");
+    const [deepgramKeyInput, setDeepgramKeyInput] = useState("");
     const [submitKeywordsInput, setSubmitKeywordsInput] = useState("press enter, hit enter");
     const [fastWordsInput, setFastWordsInput] = useState("8");
     const [wakeWordInput, setWakeWordInput] = useState("jarvis");
@@ -52,6 +56,12 @@ export function SettingsView() {
                 }
                 if (loadedSettings.groqApiKey) {
                     setGroqKeyInput(loadedSettings.groqApiKey);
+                }
+                if (loadedSettings.elevenlabsApiKey) {
+                    setElevenKeyInput(loadedSettings.elevenlabsApiKey);
+                }
+                if (loadedSettings.deepgramApiKey) {
+                    setDeepgramKeyInput(loadedSettings.deepgramApiKey);
                 }
                 if (loadedSettings.submitKeywords && loadedSettings.submitKeywords.length) {
                     setSubmitKeywordsInput(loadedSettings.submitKeywords.join(", "));
@@ -151,13 +161,47 @@ export function SettingsView() {
         }
     };
 
-    const handleProviderChange = async (provider: 'openai' | 'groq') => {
+    const handleSaveElevenKey = async () => {
+        const newSettings = { ...settings, elevenlabsApiKey: elevenKeyInput };
+        setSettings(newSettings);
+        setIsSaving(true);
+        try {
+            await saveSettings(newSettings);
+            showToast("ElevenLabs API key saved", "success");
+        } catch (error) {
+            console.error("Failed to save ElevenLabs API key:", error);
+            showToast("Failed to save API key", "error");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const handleSaveDeepgramKey = async () => {
+        const newSettings = { ...settings, deepgramApiKey: deepgramKeyInput };
+        setSettings(newSettings);
+        setIsSaving(true);
+        try {
+            await saveSettings(newSettings);
+            showToast("Deepgram API key saved", "success");
+        } catch (error) {
+            console.error("Failed to save Deepgram API key:", error);
+            showToast("Failed to save API key", "error");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const PROVIDER_LABELS: Record<NonNullable<Settings['provider']>, string> = {
+        groq: 'Groq', openai: 'OpenAI', elevenlabs: 'ElevenLabs', deepgram: 'Deepgram',
+    };
+
+    const handleProviderChange = async (provider: NonNullable<Settings['provider']>) => {
         const newSettings = { ...settings, provider };
         setSettings(newSettings);
 
         try {
             await saveSettings(newSettings);
-            showToast(`Switched to ${provider === 'groq' ? 'Groq' : 'OpenAI'}`, "success");
+            showToast(`Switched to ${PROVIDER_LABELS[provider]}`, "success");
         } catch (error) {
             console.error("Failed to save provider:", error);
             showToast("Failed to change provider", "error");
@@ -201,7 +245,45 @@ export function SettingsView() {
                                         </span>
                                     </div>
                                     <p className="text-xs text-muted-foreground mt-1">
-                                        Whisper Turbo + Llama 3.1 8B
+                                        Whisper large-v3 + Llama 3.1 8B
+                                    </p>
+                                </button>
+                                <button
+                                    onClick={() => handleProviderChange('elevenlabs')}
+                                    className={`p-4 rounded-lg border-2 text-left transition-all ${
+                                        settings.provider === 'elevenlabs'
+                                            ? 'border-primary bg-primary/5'
+                                            : 'border-muted hover:border-muted-foreground/50'
+                                    }`}
+                                    disabled={isLoading}
+                                >
+                                    <div className="font-medium flex items-center gap-2">
+                                        ElevenLabs
+                                        <span className="text-xs px-2 py-0.5 bg-blue-500/20 text-blue-600 dark:text-blue-400 rounded-full">
+                                            most accurate
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                        Scribe v1 (cleanup via Groq/OpenAI)
+                                    </p>
+                                </button>
+                                <button
+                                    onClick={() => handleProviderChange('deepgram')}
+                                    className={`p-4 rounded-lg border-2 text-left transition-all ${
+                                        settings.provider === 'deepgram'
+                                            ? 'border-primary bg-primary/5'
+                                            : 'border-muted hover:border-muted-foreground/50'
+                                    }`}
+                                    disabled={isLoading}
+                                >
+                                    <div className="font-medium flex items-center gap-2">
+                                        Deepgram
+                                        <span className="text-xs px-2 py-0.5 bg-purple-500/20 text-purple-600 dark:text-purple-400 rounded-full">
+                                            fast + accurate
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                        Nova-3 (cleanup via Groq/OpenAI)
                                     </p>
                                 </button>
                                 <button
@@ -250,6 +332,70 @@ export function SettingsView() {
                             </div>
                             <p className="text-xs text-muted-foreground">
                                 Get your free API key from <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" className="underline">console.groq.com</a>
+                            </p>
+                        </div>
+
+                        {/* ElevenLabs API Key */}
+                        <div className={`space-y-2 ${settings.provider !== 'elevenlabs' ? 'opacity-50' : ''}`}>
+                            <Label htmlFor="elevenKey">ElevenLabs API Key</Label>
+                            <div className="flex gap-2">
+                                <div className="relative flex-1">
+                                    <Input
+                                        id="elevenKey"
+                                        type={showElevenKey ? "text" : "password"}
+                                        placeholder="ElevenLabs API key"
+                                        value={elevenKeyInput}
+                                        onChange={(e) => setElevenKeyInput(e.target.value)}
+                                        disabled={isLoading}
+                                    />
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                                        onClick={() => setShowElevenKey(!showElevenKey)}
+                                    >
+                                        {showElevenKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                    </Button>
+                                </div>
+                                <Button onClick={handleSaveElevenKey} disabled={isLoading || isSaving}>
+                                    {isSaving ? "Saving..." : "Save"}
+                                </Button>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Get your API key from <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="underline">elevenlabs.io</a>. Cleanup uses your Groq/OpenAI key.
+                            </p>
+                        </div>
+
+                        {/* Deepgram API Key */}
+                        <div className={`space-y-2 ${settings.provider !== 'deepgram' ? 'opacity-50' : ''}`}>
+                            <Label htmlFor="deepgramKey">Deepgram API Key</Label>
+                            <div className="flex gap-2">
+                                <div className="relative flex-1">
+                                    <Input
+                                        id="deepgramKey"
+                                        type={showDeepgramKey ? "text" : "password"}
+                                        placeholder="Deepgram API key"
+                                        value={deepgramKeyInput}
+                                        onChange={(e) => setDeepgramKeyInput(e.target.value)}
+                                        disabled={isLoading}
+                                    />
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                                        onClick={() => setShowDeepgramKey(!showDeepgramKey)}
+                                    >
+                                        {showDeepgramKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                    </Button>
+                                </div>
+                                <Button onClick={handleSaveDeepgramKey} disabled={isLoading || isSaving}>
+                                    {isSaving ? "Saving..." : "Save"}
+                                </Button>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Get your API key from <a href="https://console.deepgram.com/" target="_blank" rel="noopener noreferrer" className="underline">console.deepgram.com</a>. Cleanup uses your Groq/OpenAI key.
                             </p>
                         </div>
 

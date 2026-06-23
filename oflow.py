@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -110,11 +111,27 @@ GTK4_LAYER_SHELL_LIB = "/usr/lib/libgtk4-layer-shell.so"
 OPENAI_API_KEY_PATTERN = re.compile(r"^sk-")
 GROQ_API_KEY_PATTERN = re.compile(r"^gsk_")
 
-# API endpoints
+# Transcription (speech-to-text) endpoints
 OPENAI_WHISPER_URL = "https://api.openai.com/v1/audio/transcriptions"
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+DEEPGRAM_STT_URL = "https://api.deepgram.com/v1/listen"
+
+# Chat (LLM cleanup) endpoints — only OpenAI-compatible providers offer this.
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# Whisper-style conditioning prompt: a realistic sample that primes domain
+# vocabulary and keeps the model in transcription (not instruction) mode.
+WHISPER_PROMPT = (
+    "Push the code to Git and open a PR. Check the API endpoint, run pytest, "
+    "then deploy to Kubernetes. Let's refactor the async handler."
+)
+
+# Force a fixed transcription language so providers don't auto-switch mid-dictation.
+# STT_LANGUAGE is ISO-639-1 (Whisper/Deepgram); the ISO-639-3 form is for ElevenLabs.
+STT_LANGUAGE = os.getenv("OFLOW_LANGUAGE", "en")
+STT_LANGUAGE_ISO3 = os.getenv("OFLOW_LANGUAGE_ISO3", "eng")
 
 # API key validation constants
 GROQ_API_KEY_LENGTH = 56
@@ -129,15 +146,18 @@ CLEANUP_TOKEN_BUFFER = 200  # Extra tokens for LLM cleanup (tokens ≈ chars/4)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
 # Default settings (can be overridden by settings.json)
 DEFAULT_ENABLE_CLEANUP = os.getenv("ENABLE_CLEANUP", "true").lower() == "true"
 DEFAULT_PROVIDER = os.getenv("PROVIDER", "groq")  # Default to Groq (faster)
 # Fast mode: dictations with at most this many words skip the cleanup LLM hop.
-# 0 disables (always clean). 8 covers short commands/replies where the ~200ms
-# cleanup latency is most felt and least needed.
-DEFAULT_FAST_MODE_MAX_WORDS = 8
+# 0 disables (always clean). 19 (i.e. under 20 words) covers most short/medium
+# dictations where the ~200ms cleanup latency is most felt and least needed —
+# modern STT models already punctuate short utterances well.
+DEFAULT_FAST_MODE_MAX_WORDS = 19
 
 
 def ensure_data_dir() -> None:
@@ -199,6 +219,8 @@ def load_settings() -> dict:
                     "enableCleanup": settings.get("enableCleanup", DEFAULT_ENABLE_CLEANUP),
                     "openaiApiKey": openai_key,
                     "groqApiKey": groq_key,
+                    "elevenlabsApiKey": settings.get("elevenlabsApiKey") or ELEVENLABS_API_KEY,
+                    "deepgramApiKey": settings.get("deepgramApiKey") or DEEPGRAM_API_KEY,
                     "provider": settings.get("provider", DEFAULT_PROVIDER),
                     "audioFeedbackTheme": settings.get("audioFeedbackTheme", "default"),
                     "audioFeedbackVolume": settings.get("audioFeedbackVolume", 0.3),
@@ -222,6 +244,8 @@ def load_settings() -> dict:
         "enableCleanup": DEFAULT_ENABLE_CLEANUP,
         "openaiApiKey": OPENAI_API_KEY,
         "groqApiKey": GROQ_API_KEY,
+        "elevenlabsApiKey": ELEVENLABS_API_KEY,
+        "deepgramApiKey": DEEPGRAM_API_KEY,
         "provider": DEFAULT_PROVIDER,
         "audioFeedbackTheme": "default",
         "audioFeedbackVolume": 0.3,
@@ -860,10 +884,181 @@ async def _post_with_retry(
             )
 
 
+# ============================================================================
+# Transcription provider registry
+# ============================================================================
+#
+# Each provider plugs into the same pipeline (record → normalize → POST → parse).
+# To add one, define an auth/request/parse trio and register it below; the rest
+# of the app selects it purely by the "provider" setting.
+
+
+def _bearer_auth(api_key: str) -> dict:
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+def _openai_compatible_request(wav_bytes: bytes, model: str, auth: dict) -> dict:
+    """Groq/OpenAI multipart /audio/transcriptions request."""
+    return {
+        "headers": auth,
+        "files": {"file": ("audio.wav", wav_bytes, "audio/wav")},
+        "data": {
+            "model": model,
+            "response_format": "json",
+            "language": STT_LANGUAGE,
+            "prompt": WHISPER_PROMPT,
+        },
+    }
+
+
+def _openai_compatible_parse(payload: dict) -> str:
+    return (payload.get("text") or "").strip()
+
+
+def _elevenlabs_request(wav_bytes: bytes, model: str, auth: dict) -> dict:
+    """ElevenLabs Scribe multipart request (model_id, not model).
+
+    language_code pins the language so Scribe doesn't auto-switch mid-dictation.
+    Scribe uses ISO-639-3 internally ("eng"), which is a stronger lock than "en".
+    """
+    return {
+        "headers": auth,
+        "files": {"file": ("audio.wav", wav_bytes, "audio/wav")},
+        "data": {"model_id": model, "language_code": STT_LANGUAGE_ISO3},
+    }
+
+
+def _deepgram_request(wav_bytes: bytes, model: str, auth: dict) -> dict:
+    """Deepgram raw-body request with query params (no multipart)."""
+    return {
+        "headers": {**auth, "Content-Type": "audio/wav"},
+        "params": {
+            "model": model,
+            "language": STT_LANGUAGE,
+            "detect_language": "false",
+            "smart_format": "true",
+            "punctuate": "true",
+        },
+        "content": wav_bytes,
+    }
+
+
+def _deepgram_parse(payload: dict) -> str:
+    try:
+        return payload["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+@dataclass(frozen=True)
+class STTProvider:
+    name: str
+    label: str
+    url: str
+    default_model: str
+    model_env: str            # env var to override the model id
+    settings_key: str         # settings.json field holding the API key
+    env_key: str              # environment-variable fallback for the key
+    signup_url: str           # where to get a key (shown on auth errors)
+    warm_url: str             # cheap GET to pre-warm the keep-alive connection
+    supports_cleanup: bool    # can this provider's key also run LLM cleanup?
+    auth_headers: Callable[[str], dict]
+    build_request: Callable[[bytes, str, dict], dict]
+    parse_response: Callable[[dict], str]
+    key_pattern: re.Pattern | None = None
+
+
+STT_PROVIDERS: dict[str, STTProvider] = {
+    "groq": STTProvider(
+        name="groq", label="Groq Whisper",
+        url=GROQ_WHISPER_URL, default_model="whisper-large-v3",
+        model_env="OFLOW_WHISPER_MODEL",
+        settings_key="groqApiKey", env_key="GROQ_API_KEY",
+        signup_url="https://console.groq.com/keys",
+        warm_url="https://api.groq.com/openai/v1/models",
+        supports_cleanup=True,
+        auth_headers=_bearer_auth,
+        build_request=_openai_compatible_request,
+        parse_response=_openai_compatible_parse,
+        key_pattern=GROQ_API_KEY_PATTERN,
+    ),
+    "openai": STTProvider(
+        name="openai", label="OpenAI Whisper",
+        url=OPENAI_WHISPER_URL, default_model="whisper-1",
+        model_env="OFLOW_OPENAI_STT_MODEL",
+        settings_key="openaiApiKey", env_key="OPENAI_API_KEY",
+        signup_url="https://platform.openai.com/api-keys",
+        warm_url="https://api.openai.com/v1/models",
+        supports_cleanup=True,
+        auth_headers=_bearer_auth,
+        build_request=_openai_compatible_request,
+        parse_response=_openai_compatible_parse,
+        key_pattern=OPENAI_API_KEY_PATTERN,
+    ),
+    "elevenlabs": STTProvider(
+        name="elevenlabs", label="ElevenLabs Scribe",
+        url=ELEVENLABS_STT_URL, default_model="scribe_v1",
+        model_env="OFLOW_ELEVENLABS_MODEL",
+        settings_key="elevenlabsApiKey", env_key="ELEVENLABS_API_KEY",
+        signup_url="https://elevenlabs.io/app/settings/api-keys",
+        warm_url="https://api.elevenlabs.io/v1/models",
+        supports_cleanup=False,
+        auth_headers=lambda key: {"xi-api-key": key},
+        build_request=_elevenlabs_request,
+        parse_response=_openai_compatible_parse,  # Scribe also returns {"text": ...}
+    ),
+    "deepgram": STTProvider(
+        name="deepgram", label="Deepgram Nova-3",
+        url=DEEPGRAM_STT_URL, default_model="nova-3",
+        model_env="OFLOW_DEEPGRAM_MODEL",
+        settings_key="deepgramApiKey", env_key="DEEPGRAM_API_KEY",
+        signup_url="https://console.deepgram.com/",
+        warm_url="https://api.deepgram.com/v1/auth/token",
+        supports_cleanup=False,
+        auth_headers=lambda key: {"Authorization": f"Token {key}"},
+        build_request=_deepgram_request,
+        parse_response=_deepgram_parse,
+    ),
+}
+
+# Providers tried (in order) for LLM cleanup when the STT provider can't do it.
+CLEANUP_FALLBACK_ORDER = ("groq", "openai")
+
+
+def get_stt_provider(provider: str) -> STTProvider:
+    """Resolve a provider config, defaulting to Groq for unknown names."""
+    return STT_PROVIDERS.get(provider) or STT_PROVIDERS["groq"]
+
+
+def get_provider_key(settings: dict, provider: str) -> str:
+    """API key for a provider: settings.json first, then env var."""
+    cfg = STT_PROVIDERS.get(provider)
+    if not cfg:
+        return ""
+    return (settings.get(cfg.settings_key) or os.getenv(cfg.env_key) or "").strip()
+
+
+def resolve_cleanup_provider(settings: dict, stt_provider: str, stt_key: str):
+    """Pick a chat-capable (provider, key) for LLM cleanup.
+
+    ElevenLabs/Deepgram don't expose a chat endpoint, so when they transcribe we
+    fall back to whatever chat key is configured (Groq, then OpenAI). Returns
+    (None, None) if no chat-capable key is available — cleanup is then skipped.
+    """
+    cfg = STT_PROVIDERS.get(stt_provider)
+    if cfg and cfg.supports_cleanup and stt_key:
+        return stt_provider, stt_key
+    for name in CLEANUP_FALLBACK_ORDER:
+        key = get_provider_key(settings, name)
+        if key:
+            return name, key
+    return None, None
+
+
 async def transcribe_audio(
     client: httpx.AsyncClient, audio: np.ndarray, api_key: str, provider: str
 ) -> str:
-    """Transcribe audio using Whisper API."""
+    """Transcribe audio via the configured speech-to-text provider."""
     if len(audio) == 0:
         return ""
 
@@ -875,46 +1070,24 @@ async def transcribe_audio(
     normalized = AudioProcessor.normalize(audio)
     wav_bytes = AudioProcessor.to_wav_bytes(normalized)
 
-    if provider == "groq":
-        url = GROQ_WHISPER_URL
-        # whisper-large-v3 (full) is the most accurate Whisper on Groq. The "turbo"
-        # variant is faster but speed-distilled and noticeably less accurate; on
-        # Groq's hardware the full model is still fast enough for dictation.
-        # Override with OFLOW_WHISPER_MODEL (e.g. whisper-large-v3-turbo for speed).
-        model = os.getenv("OFLOW_WHISPER_MODEL", "whisper-large-v3")
-    else:
-        url = OPENAI_WHISPER_URL
-        model = "whisper-1"
+    cfg = get_stt_provider(provider)
+    model = os.getenv(cfg.model_env, cfg.default_model)
+    request_kwargs = cfg.build_request(wav_bytes, model, cfg.auth_headers(api_key))
 
     try:
-        response = await _post_with_retry(
-            client,
-            url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-            data={
-                "model": model,
-                "response_format": "json",
-                "language": "en",
-                # Whisper's prompt is a conditioning prefix, not an instruction.
-                # Providing realistic transcription primes vocabulary and keeps it in transcription mode.
-                "prompt": "Push the code to Git and open a PR. Check the API endpoint, run pytest, then deploy to Kubernetes. Let's refactor the async handler.",
-            },
-        )
+        response = await _post_with_retry(client, cfg.url, **request_kwargs)
         if response.status_code == 200:
-            text = response.json().get("text", "").strip()
+            text = cfg.parse_response(response.json())
             if is_hallucination(text):
                 return ""
             return text
         elif response.status_code == 401:
-            logger.error(f"❌ Authentication failed: Invalid {provider.capitalize()} API key")
-            logger.error(
-                f"   Get a valid key at: {'https://console.groq.com/keys' if provider == 'groq' else 'https://platform.openai.com/api-keys'}"
-            )
+            logger.error(f"❌ Authentication failed: Invalid {cfg.label} API key")
+            logger.error(f"   Get a valid key at: {cfg.signup_url}")
         else:
-            logger.error(f"Whisper API error: {response.status_code} - {response.text[:200]}")
+            logger.error(f"{cfg.label} API error: {response.status_code} - {response.text[:200]}")
     except httpx.TimeoutException:
-        logger.error(f"❌ API timeout - check your internet connection")
+        logger.error("❌ API timeout - check your internet connection")
     except Exception as e:
         logger.error(f"Transcription error: {e}")
     return ""
@@ -1456,15 +1629,8 @@ class VoiceDictationServer:
         # Set initial waybar state
         self.waybar_state.idle()
 
-        # Set mic volume
-        try:
-            subprocess.run(
-                ["pactl", "set-source-volume", "@DEFAULT_SOURCE@", "100%"],
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except FileNotFoundError:
-            pass
+        # Set mic volume (also re-asserted on every recording start)
+        self._set_mic_volume()
 
         # Audio stream (created on-demand, not always running)
         self.stream = None
@@ -1496,11 +1662,13 @@ class VoiceDictationServer:
 
         settings = load_settings()
         provider = settings.get("provider", "groq")
-        if provider == "groq":
-            logger.info("oflow Ready (Groq - optimized mode)")
-            self._schedule_on_loop(self._prewarm_connection())
-        else:
-            logger.info("oflow Ready (OpenAI Whisper + GPT-4o-mini)")
+        cfg = get_stt_provider(provider)
+        logger.info(f"oflow Ready ({cfg.label})")
+        self._schedule_on_loop(self._prewarm_connection())
+        if not cfg.supports_cleanup:
+            cu_provider, _ = resolve_cleanup_provider(settings, provider, get_provider_key(settings, provider))
+            if cu_provider:
+                logger.info(f"LLM cleanup will use {get_stt_provider(cu_provider).label}")
 
     def _start_async_loop(self):
         """Spin up the persistent event loop (background thread) + HTTP client."""
@@ -1544,16 +1712,18 @@ class VoiceDictationServer:
         if self._client is None:
             return
         settings = load_settings()
-        api_key = settings.get("groqApiKey")
+        provider = settings.get("provider", "groq")
+        cfg = get_stt_provider(provider)
+        api_key = get_provider_key(settings, provider)
         if not api_key:
             return
         try:
             await self._client.get(
-                "https://api.groq.com/openai/v1/models",
-                headers={"Authorization": f"Bearer {api_key}"},
+                cfg.warm_url,
+                headers=cfg.auth_headers(api_key),
                 timeout=5.0,
             )
-            logger.debug("Connection pre-warmed")
+            logger.debug(f"Connection pre-warmed ({cfg.label})")
         except Exception as e:
             logger.debug(f"Pre-warm failed: {e}")
 
@@ -1717,6 +1887,24 @@ class VoiceDictationServer:
                 continue
         self._paused_players = []
 
+    def _set_mic_volume(self, level="100%"):
+        """Force the default input source to a fixed level.
+
+        Other apps (browsers, meeting tools, AGC) routinely lower the mic
+        gain, which starves Whisper of signal and hurts accuracy. We re-assert
+        this on every recording start so each dictation gets a strong, level
+        input. Overridable via OFLOW_MIC_VOLUME (e.g. "120%").
+        """
+        level = os.getenv("OFLOW_MIC_VOLUME", level)
+        try:
+            subprocess.run(
+                ["pactl", "set-source-volume", "@DEFAULT_SOURCE@", level],
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except FileNotFoundError:
+            pass
+
     def _start_recording(self):
         """Start recording audio."""
         with self._recording_lock:
@@ -1727,6 +1915,9 @@ class VoiceDictationServer:
             self.is_recording = True
             self.audio_data = []
             self._last_stream_warn = 0.0
+
+            # Re-assert mic gain — other apps/AGC may have lowered it since last time.
+            self._set_mic_volume()
 
             try:
                 # Start audio stream on-demand (saves CPU when idle).
@@ -1927,14 +2118,14 @@ class VoiceDictationServer:
         """Process recorded audio: transcribe, clean up, and type result."""
         settings = load_settings()
         provider = settings.get("provider", "groq")
-        api_key = settings.get("groqApiKey") if provider == "groq" else settings.get("openaiApiKey")
+        api_key = get_provider_key(settings, provider)
         enable_cleanup = settings.get("enableCleanup", True)
         enable_actions = settings.get("enableSpokenActions", True)
         wake_word = settings.get("commandWakeWord", DEFAULT_WAKE_WORD)
         fast_max_words = settings.get("fastModeMaxWords", DEFAULT_FAST_MODE_MAX_WORDS)
 
         if not api_key:
-            error_msg = f"❌ {provider.capitalize()} API key not set. Configure it in Settings."
+            error_msg = f"❌ {get_stt_provider(provider).label} API key not set. Configure it in Settings."
             logger.error(error_msg)
             self.waybar_state.error("API key not set")
             self.audio_feedback.play_error()
@@ -1996,13 +2187,16 @@ class VoiceDictationServer:
         # Apply text processing (spoken punctuation, replacements)
         raw_text = self.text_processor.process(raw_text)
 
-        # Cleanup (if enabled) — fast mode skips it on short dictations.
+        # Cleanup (if enabled) — fast mode skips it on short dictations. The
+        # cleanup LLM may run on a different provider than transcription, since
+        # ElevenLabs/Deepgram don't offer a chat endpoint (falls back to Groq/OpenAI).
         skip_for_speed = should_skip_cleanup(raw_text, fast_max_words)
-        if enable_cleanup and not skip_for_speed:
+        cleanup_provider, cleanup_key = resolve_cleanup_provider(settings, provider, api_key)
+        if enable_cleanup and not skip_for_speed and cleanup_key:
             t0 = time.perf_counter()
-            cleaned_text = await cleanup_text(client, raw_text, api_key, provider)
+            cleaned_text = await cleanup_text(client, raw_text, cleanup_key, cleanup_provider)
             t1 = time.perf_counter()
-            logger.info(f"Cleanup: {(t1 - t0) * 1000:.0f}ms")
+            logger.info(f"Cleanup: {(t1 - t0) * 1000:.0f}ms ({get_stt_provider(cleanup_provider).label})")
         else:
             cleaned_text = raw_text
             if enable_cleanup and skip_for_speed:
@@ -2010,6 +2204,8 @@ class VoiceDictationServer:
                     f"Fast mode: skipped cleanup ({len(raw_text.split())} words "
                     f"<= {fast_max_words})"
                 )
+            elif enable_cleanup and not cleanup_key:
+                logger.info("Cleanup skipped: no Groq/OpenAI key configured for the cleanup LLM")
 
         # Output: run "<wake word> command" voice commands as real keystrokes
         # (default), or paste-and-optionally-submit on the legacy path.
@@ -2119,30 +2315,33 @@ def validate_configuration() -> None:
 
     settings = load_settings()
     provider = settings.get("provider", "groq")
+    if provider not in STT_PROVIDERS:
+        logger.error(
+            f"❌ Unknown provider '{provider}'. "
+            f"Valid options: {', '.join(STT_PROVIDERS)}. Falling back to Groq."
+        )
+        provider = "groq"
+    cfg = get_stt_provider(provider)
 
-    if provider == "groq":
-        api_key = settings.get("groqApiKey")
-        if not api_key:
-            logger.warning(
-                "⚠️  Groq API key not configured. "
-                "Get one at https://console.groq.com/keys (free tier available)"
+    api_key = get_provider_key(settings, provider)
+    if not api_key:
+        logger.warning(f"⚠️  {cfg.label} API key not configured. Get one at {cfg.signup_url}")
+    elif cfg.key_pattern and not cfg.key_pattern.match(api_key):
+        logger.error(f"❌ Invalid {cfg.label} API key format.")
+    elif provider == "groq" and len(api_key) > GROQ_API_KEY_MAX_LENGTH:
+        logger.error(
+            "❌ Groq API key looks duplicated (too long). "
+            f"Expected ~{GROQ_API_KEY_LENGTH} chars, got {len(api_key)}. Check ~/.oflow/settings.json"
+        )
+
+    # Cleanup needs a chat-capable (Groq/OpenAI) key; warn if STT can't and none exists.
+    if api_key and not cfg.supports_cleanup and settings.get("enableCleanup", True):
+        cu_provider, _ = resolve_cleanup_provider(settings, provider, api_key)
+        if not cu_provider:
+            logger.info(
+                f"ℹ️  {cfg.label} has no LLM cleanup; add a Groq or OpenAI key "
+                "to enable cleanup, otherwise it will be skipped."
             )
-        elif not GROQ_API_KEY_PATTERN.match(api_key):
-            logger.error("❌ Invalid Groq API key format. Expected format: gsk_...")
-        elif len(api_key) > 60:
-            logger.error(
-                "❌ Groq API key looks duplicated (too long). "
-                f"Expected ~56 chars, got {len(api_key)}. Check ~/.oflow/settings.json"
-            )
-    else:
-        api_key = settings.get("openaiApiKey")
-        if not api_key:
-            logger.warning(
-                "⚠️  OpenAI API key not configured. "
-                "Set it in the UI Settings or via OPENAI_API_KEY environment variable."
-            )
-        elif not OPENAI_API_KEY_PATTERN.match(api_key):
-            logger.error("❌ Invalid OpenAI API key format. Expected format: sk-...")
 
     logger.info("Configuration validated successfully")
 
