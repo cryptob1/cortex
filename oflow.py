@@ -58,10 +58,28 @@ except ImportError:
 load_dotenv()
 
 _debug_mode = os.getenv("DEBUG_MODE", "false").lower() == "true"
+
+# Persist logs to a rotating file (in addition to stderr/journal) so that
+# intermittent failures — a mic that drops out, a flaky STT request — can be
+# diagnosed after the fact instead of vanishing with the journal buffer.
+_LOG_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "oflow"
+LOG_FILE = _LOG_DIR / "oflow.log"
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    from logging.handlers import RotatingFileHandler
+
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _log_handlers.append(
+        RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3)
+    )
+except OSError:
+    pass  # unwritable state dir — fall back to stderr only
+
 logging.basicConfig(
     level=logging.DEBUG if _debug_mode else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
 
@@ -84,6 +102,8 @@ MIN_AUDIO_AMPLITUDE = 0.02  # Minimum amplitude to detect speech
 CHUNK_DURATION_SECONDS = 25  # Max chunk duration for Whisper (split long audio)
 CHUNK_SPLIT_WINDOW_SECONDS = 3  # Window to search for silence near split point
 MAX_RECORDING_SECONDS = 300  # Auto-stop runaway recordings to prevent leaks from stuck state
+AUDIO_OPEN_MAX_ATTEMPTS = 4  # Retries opening the mic (PortAudio reinit) before giving up
+AUDIO_OPEN_RETRY_DELAY = 0.3  # Seconds between mic-open attempts, to let the audio server settle
 STREAM_WARN_INTERVAL_SECONDS = 5.0  # Throttle audio-stream distress warnings
 
 # API configuration
@@ -2062,15 +2082,19 @@ class VoiceDictationServer:
             logger.info("Recording started")
 
     def _open_audio_stream(self):
-        """Open and start the input stream, recovering from a stale PortAudio
-        device list.
+        """Open and start the input stream, recovering from a stale/empty
+        PortAudio device list.
 
         PortAudio snapshots the ALSA/PipeWire device list when it first
         initializes and never refreshes it. After the audio server
-        (PipeWire/WirePlumber) restarts, the cached default-source handle is
-        gone and ``InputStream`` open fails with ``ALSA error -2`` ('No such
-        file or directory'). Reinitializing PortAudio re-enumerates devices, so
-        we retry once after a clean reinit before giving up.
+        (PipeWire/WirePlumber) restarts — or if the mic briefly drops out — the
+        cached default-source handle is stale and ``InputStream`` open fails
+        with ``ALSA error -2`` ('No such file or directory'). This is the usual
+        cause of intermittent "recording failed": reinitializing PortAudio
+        re-enumerates devices, so we reinit and retry a few times, giving the
+        audio server a moment to settle between attempts. On every failure we
+        log the devices PortAudio can see, so a stale list (mic present, open
+        still fails) is distinguishable from a genuinely missing mic.
         """
 
         def _make():
@@ -2084,19 +2108,66 @@ class VoiceDictationServer:
             stream.start()
             return stream
 
-        try:
-            return _make()
-        except Exception:
-            logger.warning(
-                "InputStream open failed; reinitializing PortAudio (device list "
-                "likely stale after an audio-server restart) and retrying once"
-            )
+        last_err: Exception | None = None
+        for attempt in range(1, AUDIO_OPEN_MAX_ATTEMPTS + 1):
             try:
-                sd._terminate()
-                sd._initialize()
-            except Exception:
-                logger.exception("PortAudio reinitialization failed")
-            return _make()
+                stream = _make()
+                if attempt > 1:
+                    logger.info(f"Audio stream opened on attempt {attempt}")
+                return stream
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    f"InputStream open failed "
+                    f"(attempt {attempt}/{AUDIO_OPEN_MAX_ATTEMPTS}): "
+                    f"{type(e).__name__}: {e}"
+                )
+                self._log_audio_devices()
+                if attempt < AUDIO_OPEN_MAX_ATTEMPTS:
+                    # Reinit so PortAudio re-enumerates devices (its cached list
+                    # is stale after an audio-server restart), then let the
+                    # server settle briefly before the next attempt.
+                    try:
+                        sd._terminate()
+                        sd._initialize()
+                    except Exception:
+                        logger.exception("PortAudio reinitialization failed")
+                    time.sleep(AUDIO_OPEN_RETRY_DELAY)
+
+        logger.error(
+            "Could not open the microphone after %d attempts. Check that a "
+            "capture device exists; if the audio server was restarted, try: "
+            "systemctl --user restart wireplumber pipewire pipewire-pulse",
+            AUDIO_OPEN_MAX_ATTEMPTS,
+        )
+        raise last_err  # type: ignore[misc]
+
+    def _log_audio_devices(self):
+        """Log the input devices PortAudio currently sees. This is the single
+        most useful breadcrumb for the intermittent 'recording failed' case:
+        it tells a stale device list (real mic listed, open still fails) apart
+        from a dropped mic (only monitors, or nothing)."""
+        try:
+            devices = sd.query_devices()
+        except Exception as e:
+            logger.warning(f"Could not query audio devices: {type(e).__name__}: {e}")
+            return
+        inputs = [
+            f"[{i}] {d['name']} (in={d['max_input_channels']})"
+            for i, d in enumerate(devices)
+            if d.get("max_input_channels", 0) > 0
+        ]
+        if not inputs:
+            logger.error(
+                "PortAudio sees NO input devices — the microphone is not "
+                "available to this process (the audio server may have dropped it)."
+            )
+            return
+        logger.info("PortAudio input devices: " + "; ".join(inputs))
+        try:
+            logger.info(f"PortAudio default input: {sd.query_devices(kind='input')['name']}")
+        except Exception:
+            pass
 
     def _rollback_recording(self):
         """Reset recording state after a failed start. Caller must hold the lock."""
