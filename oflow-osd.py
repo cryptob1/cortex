@@ -4,11 +4,18 @@
 A small, borderless, click-through layer-shell window anchored bottom-center
 that shows a recording dot and a live audio level meter while oflow records.
 
-It is spawned by the oflow backend on record start. The backend streams audio
-levels (one float per packet, plus a final "stop" sentinel) over a Unix
-datagram socket at $XDG_RUNTIME_DIR/oflow/osd.sock. The overlay animates a
-scrolling waveform from those levels and exits when recording stops (or after
-an idle timeout, as a safety net).
+It is spawned once by the oflow backend (at launch) and stays resident, hidden
+between dictations, so the GTK startup cost is paid a single time rather than on
+every hotkey press. The backend drives it over a Unix datagram socket at
+$XDG_RUNTIME_DIR/oflow/osd.sock with these messages:
+
+  - b"show"        reveal the overlay for a new recording
+  - <float32>      an audio level in [0,1] (also auto-reveals if hidden)
+  - b"stop"        fade out and hide (stays resident)
+  - b"quit"        exit the process (backend shutdown)
+
+It also hides on an idle timeout (backend died mid-record) and exits if it is
+orphaned (its parent backend went away), so a hidden window is never leaked.
 
 Requires: gtk4, gtk4-layer-shell, python-gobject, python-cairo.
 """
@@ -21,7 +28,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gtk, Gdk, GLib, Gtk4LayerShell as LayerShell  # noqa: E402
+from gi.repository import Gtk, Gdk, Gio, GLib, Gtk4LayerShell as LayerShell  # noqa: E402
 import cairo  # noqa: E402
 
 RUNTIME_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "oflow")
@@ -36,7 +43,14 @@ FPS_MS = 16  # ~60fps
 
 class Osd(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="com.oflow.osd")
+        # NON_UNIQUE: the backend owns the overlay's lifecycle (one resident
+        # instance per backend). Without this, a fresh spawn after a backend
+        # restart would defer to a still-dying orphaned instance instead of
+        # starting its own.
+        super().__init__(
+            application_id="com.oflow.osd",
+            flags=Gio.ApplicationFlags.NON_UNIQUE,
+        )
         self.levels = [0.0] * N_BARS   # rolling history, newest at the end
         self.target = 0.0              # latest level from the backend
         self.smooth = 0.0              # smoothed current level
@@ -45,6 +59,9 @@ class Osd(Gtk.Application):
         self.fade = 1.0                # 1.0 visible -> 0.0 gone (on stop)
         self.pulse = 0.0               # recording-dot pulse phase
         self.sock = None
+        self.visible = False           # window presented (recording) vs hidden
+        self._ticking = False          # is the animation timeout running?
+        self.parent_pid = os.getppid()  # backend pid; we exit if this changes
 
     # ------------------------------------------------------------------ setup
     def do_activate(self):
@@ -74,11 +91,60 @@ class Osd(Gtk.Application):
         area.set_draw_func(self._draw)
         self.area = area
         win.set_child(area)
-        win.present()
 
-        self._make_click_through()
+        # Stay resident but start hidden; the backend sends "show" per recording.
+        # hold() keeps the GApplication main loop alive while no window is mapped.
+        self.hold()
         self._open_socket()
-        GLib.timeout_add(FPS_MS, self._tick)
+        # If the backend that spawned us dies, we get reparented — exit so a
+        # hidden overlay isn't leaked.
+        GLib.timeout_add_seconds(5, self._check_orphaned)
+
+    # --------------------------------------------------------- show / hide
+    def _show(self):
+        """Reveal the overlay for a recording, resetting the meter to zero."""
+        self.levels = [0.0] * N_BARS
+        self.target = 0.0
+        self.smooth = 0.0
+        self.fade = 1.0
+        self.stopping = False
+        self.last_packet_us = GLib.get_monotonic_time()
+        if not self.visible:
+            self.visible = True
+            self.win.present()
+            self._make_click_through()
+            if not self._ticking:
+                self._ticking = True
+                GLib.timeout_add(FPS_MS, self._tick)
+
+    def _hide(self):
+        """Hide the overlay but stay resident (warm) for the next recording."""
+        self.visible = False
+        self.stopping = False
+        self.fade = 1.0
+        self._ticking = False  # _tick returns False to stop when this is cleared
+        try:
+            self.win.set_visible(False)
+        except Exception:
+            pass
+
+    def _shutdown(self):
+        """Close the socket and exit the process."""
+        if self.sock:
+            try:
+                self.sock.close()
+                os.remove(SOCK_PATH)
+            except OSError:
+                pass
+            self.sock = None
+        self.quit()
+
+    def _check_orphaned(self):
+        """Exit if our parent (the oflow backend) has gone away."""
+        if os.getppid() != self.parent_pid:
+            self._shutdown()
+            return False
+        return True
 
     def _make_click_through(self):
         """Empty input region => pointer events pass through to windows below."""
@@ -110,8 +176,19 @@ class Osd(Gtk.Application):
                     break
                 self.last_packet_us = GLib.get_monotonic_time()
                 if data[:4] == b"stop":
-                    self.stopping = True
+                    # Only fade if actually shown; a stray stop while hidden is a no-op.
+                    if self.visible:
+                        self.stopping = True
+                elif data[:4] == b"show":
+                    self._show()
+                elif data[:4] == b"quit":
+                    self._shutdown()
+                    return False  # drop the io watch; we're exiting
                 else:
+                    # A raw float level. Auto-reveal if the backend streamed
+                    # levels without an explicit "show" first.
+                    if not self.visible:
+                        self._show()
                     try:
                         self.target = max(0.0, min(1.0, struct.unpack("<f", data[:4])[0]))
                     except struct.error:
@@ -122,7 +199,12 @@ class Osd(Gtk.Application):
 
     # ------------------------------------------------------------- animation
     def _tick(self):
-        # Idle safety net: if the backend stopped sending, fade out.
+        # Stop animating once hidden (a new "show" restarts the timeout).
+        if not self._ticking:
+            return False
+
+        # Idle safety net: if the backend stopped sending (e.g. it crashed
+        # mid-record without a "stop"), fade out and hide.
         if GLib.get_monotonic_time() - self.last_packet_us > IDLE_TIMEOUT_US:
             self.stopping = True
 
@@ -138,13 +220,7 @@ class Osd(Gtk.Application):
         if self.stopping:
             self.fade -= 0.08
             if self.fade <= 0:
-                if self.sock:
-                    try:
-                        self.sock.close()
-                        os.remove(SOCK_PATH)
-                    except OSError:
-                        pass
-                self.quit()
+                self._hide()  # stay resident, just hide until the next "show"
                 return False
 
         self.area.queue_draw()

@@ -112,3 +112,32 @@ class TestHallucinationDetection:
         assert not is_hallucination("Update the e2e script to open a PR automatically.")
         assert not is_hallucination("The async handler in the worker is leaking memory.")
         assert not is_hallucination("Let's refactor the storage layer next sprint.")
+
+    @pytest.mark.unit
+    def test_loud_short_phrase_is_trusted(self):
+        """A stock phrase spoken with strong mic signal is real speech, not a
+        silence hallucination, and must pass through.
+
+        Regression test: Whisper emits "Thank you." on near-silence, but the
+        same words said loudly are legitimate dictation. The raw mic peak tells
+        them apart — above HALLUCINATION_TRUST_PEAK we trust the transcription.
+        """
+        assert not is_hallucination("Thank you.", peak=0.25)
+        assert not is_hallucination("thanks for watching", peak=0.30)
+        assert not is_hallucination("please subscribe", peak=0.5)
+
+    @pytest.mark.unit
+    def test_quiet_short_phrase_still_filtered(self):
+        """Near-silent stock phrases (and the no-peak default) stay filtered."""
+        assert is_hallucination("Thank you.", peak=0.03)  # near-silence
+        assert is_hallucination("Thank you.")             # unknown peak → filter
+        assert is_hallucination("please subscribe", peak=0.0)
+
+    @pytest.mark.unit
+    def test_loudness_does_not_bypass_other_filters(self):
+        """A loud clip still can't smuggle punctuation-only, prompt-leakage, or
+        AI-response text through — only stock hallucination phrases are gated
+        on signal strength."""
+        assert is_hallucination(".", peak=0.9)
+        assert is_hallucination("Push the code to Git and open a PR.", peak=0.9)
+        assert is_hallucination("As an AI, I don't have", peak=0.9)

@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import wave
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -98,10 +99,30 @@ SAMPLE_RATE = 16000  # 16kHz sample rate (Whisper requirement)
 AUDIO_CHANNELS = 1  # Mono audio
 NORMALIZATION_TARGET = 0.95  # Normalize audio to 95% of max amplitude
 MIN_AUDIO_DURATION_SECONDS = 0.5  # Minimum recording duration
-MIN_AUDIO_AMPLITUDE = 0.02  # Minimum amplitude to detect speech
+# Minimum peak amplitude for a clip to be treated as speech. Kept low so quiet
+# and *whispered* dictation isn't dropped before it reaches the STT model —
+# normalization (below) boosts a quiet-but-real clip up to NORMALIZATION_TARGET
+# afterwards, so this only needs to clear true silence/noise, not be loud.
+# Override with OFLOW_MIN_AMPLITUDE if your environment is noisier.
+MIN_AUDIO_AMPLITUDE = float(os.getenv("OFLOW_MIN_AMPLITUDE", "0.006"))
+# Raw mic peak above which we trust a short transcription even if it matches a
+# stock hallucination phrase ("thank you", "subscribe"). Silence-hallucinations
+# come from near-silent clips; a loud, clear clip saying "thank you" is real.
+HALLUCINATION_TRUST_PEAK = 0.10
 CHUNK_DURATION_SECONDS = 25  # Max chunk duration for Whisper (split long audio)
 CHUNK_SPLIT_WINDOW_SECONDS = 3  # Window to search for silence near split point
 MAX_RECORDING_SECONDS = 300  # Auto-stop runaway recordings to prevent leaks from stuck state
+AUDIO_BLOCKSIZE = 1600  # 100ms chunks → 10 callbacks/sec (3000-chunk queue = 5 min)
+# Keep a persistent input stream open across dictations (default). This removes
+# the per-record PortAudio/PipeWire open latency — the main reason the first
+# words get clipped — and keeps the pre-roll buffer warm. Set false to fall back
+# to the old open-on-record behavior (mic only held while actually recording).
+PERSISTENT_MIC = os.getenv("OFLOW_PERSISTENT_MIC", "true").lower() == "true"
+# Rolling audio retained *before* the hotkey press, so speech that starts as
+# your finger comes down on the key isn't clipped. Only effective with a
+# persistent stream (otherwise the stream isn't open yet to fill it).
+PREROLL_SECONDS = float(os.getenv("OFLOW_PREROLL_SECONDS", "0.5"))
+PREROLL_CHUNKS = max(1, round(PREROLL_SECONDS * SAMPLE_RATE / AUDIO_BLOCKSIZE))
 AUDIO_OPEN_MAX_ATTEMPTS = 4  # Retries opening the mic (PortAudio reinit) before giving up
 AUDIO_OPEN_RETRY_DELAY = 0.3  # Seconds between mic-open attempts, to let the audio server settle
 STREAM_WARN_INTERVAL_SECONDS = 5.0  # Throttle audio-stream distress warnings
@@ -751,9 +772,10 @@ class StorageManager:
 # Transcription
 # ============================================================================
 
-# Common Whisper hallucinations to filter out
-HALLUCINATION_PATTERNS = [
-    # YouTube-style hallucinations
+# YouTube-style hallucinations. These correlate with near-silent audio —
+# Whisper invents them when there's little to transcribe — so a loud, clear
+# clip that says these words is real speech (see HALLUCINATION_TRUST_PEAK).
+SILENCE_HALLUCINATION_PATTERNS = [
     "thank you",
     "thanks for watching",
     "subscribe",
@@ -775,7 +797,12 @@ HALLUCINATION_PATTERNS = [
     "catch you",
     "until next time",
     "stay tuned",
-    # AI assistant responses (when Whisper acts like a chatbot)
+]
+
+# AI-assistant responses (Whisper acting like a chatbot). This is model
+# leakage, not a silence artifact: it is wrong regardless of how loud the clip
+# was, so — unlike the silence patterns above — it is filtered even when loud.
+AI_ASSISTANT_PATTERNS = [
     "i'm sorry",
     "i cannot",
     "i can't",
@@ -789,6 +816,9 @@ HALLUCINATION_PATTERNS = [
     "let me know if",
     "feel free to ask",
 ]
+
+# Combined list, kept for any external reference.
+HALLUCINATION_PATTERNS = SILENCE_HALLUCINATION_PATTERNS + AI_ASSISTANT_PATTERNS
 
 # Whisper conditioning prompt leakage. The priming prompt in transcribe_audio
 # contains engineering vocabulary; when audio is weak Whisper sometimes echoes
@@ -846,8 +876,15 @@ def is_wrong_language(text: str) -> bool:
     return non_latin / len(letters) > 0.3
 
 
-def is_hallucination(text: str) -> bool:
+def is_hallucination(text: str, peak: float = 0.0) -> bool:
     """Check if text is likely a Whisper hallucination or AI response.
+
+    ``peak`` is the RAW mic peak of the clip (pre-normalization). Silence-
+    hallucinations ("Thank you.", "Subscribe") come from near-silent audio, so
+    when the clip had strong signal (``peak >= HALLUCINATION_TRUST_PEAK``) we
+    trust a short stock phrase as real speech instead of filtering it. The
+    default peak of 0.0 means "unknown" and preserves the original,
+    always-filter behavior for callers (and tests) that don't pass it.
 
     Logs the matched pattern at INFO when filtering so users can see exactly
     why a recording produced no output.
@@ -865,19 +902,36 @@ def is_hallucination(text: str) -> bool:
     # Real Whisper hallucinations are brief repetitive phrases ("Thank you",
     # "Subscribe", etc). Longer text that merely contains these as substrings
     # is real speech and must not be filtered.
+    loud = peak >= HALLUCINATION_TRUST_PEAK
     if len(text_lower) < 60:
-        hits = [p for p in HALLUCINATION_PATTERNS if p in text_lower]
+        ai_hits = [p for p in AI_ASSISTANT_PATTERNS if p in text_lower]
+        silence_hits = [p for p in SILENCE_HALLUCINATION_PATTERNS if p in text_lower]
+        # A loud, clear clip is real speech, so forgive silence-hallucination
+        # phrases ("thank you", "subscribe") — but never AI-assistant leakage,
+        # which is wrong at any volume.
+        effective_hits = ai_hits + ([] if loud else silence_hits)
         # Filter if a single pattern accounts for most of the text...
-        for pattern in hits:
+        for pattern in effective_hits:
             if len(text_lower) < len(pattern) + 15:
-                logger.info(f"Filtered hallucination (matched {pattern!r}): {text[:80]}")
+                logger.info(
+                    f"Filtered hallucination (matched {pattern!r}, "
+                    f"peak={peak:.3f}): {text[:80]}"
+                )
                 return True
         # ...or if several distinct patterns stack up in short text. Real speech
         # rarely chains multiple AI/YouTube clichés ("I'm sorry, I cannot help");
         # Whisper hallucinations do. Mirrors the 2+ prompt-leakage heuristic below.
-        if len(hits) >= 2:
-            logger.info(f"Filtered hallucination (matched {hits}): {text[:80]}")
+        if len(effective_hits) >= 2:
+            logger.info(
+                f"Filtered hallucination (matched {effective_hits}, "
+                f"peak={peak:.3f}): {text[:80]}"
+            )
             return True
+        if loud and silence_hits:
+            logger.info(
+                f"Trusted short phrase despite {silence_hits} (strong signal, "
+                f"peak={peak:.3f}): {text[:80]}"
+            )
 
     # Conditioning-prompt leakage: require 2+ matches, since a single phrase
     # is usually legitimate engineering dictation.
@@ -1152,7 +1206,7 @@ async def transcribe_audio(
         response = await _post_with_retry(client, cfg.url, **request_kwargs)
         if response.status_code == 200:
             text = cfg.parse_response(response.json())
-            if is_hallucination(text):
+            if is_hallucination(text, peak=float(max_amplitude)):
                 return ""
             if is_wrong_language(text):
                 logger.info(f"Filtered non-English transcription: {text[:80]}")
@@ -1689,6 +1743,11 @@ class VoiceDictationServer:
         # Bounded queue: max 3000 chunks = ~300 seconds (5 minutes) at 10 chunks/sec (prevents memory leak)
         self.audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=3000)
         self.audio_data: list[np.ndarray] = []
+        # Rolling pre-roll: the last PREROLL_CHUNKS captured while idle, so the
+        # start of speech (spoken as the hotkey goes down) is prepended to the
+        # recording instead of being lost. Fed on every callback; bounded, so it
+        # self-trims. Only meaningful with a persistent stream (PERSISTENT_MIC).
+        self._preroll: deque[np.ndarray] = deque(maxlen=PREROLL_CHUNKS)
         # Characters left on screen by the last dictation, so "scratch that" in a
         # following dictation can delete them.
         self._last_output_chars = 0
@@ -1750,6 +1809,22 @@ class VoiceDictationServer:
             cu_provider, _ = resolve_cleanup_provider(settings, provider, get_provider_key(settings, provider))
             if cu_provider:
                 logger.info(f"LLM cleanup will use {get_stt_provider(cu_provider).label}")
+
+        # Pre-warm the mic: open the stream now so the first dictation has no
+        # open latency and the pre-roll is already filling. Best-effort — if no
+        # mic is present yet, recording start will retry and self-heal.
+        if PERSISTENT_MIC:
+            try:
+                with self._recording_lock:
+                    self._ensure_stream_open()
+                logger.info("Mic stream pre-opened (persistent)")
+            except Exception as e:
+                logger.warning(f"Could not pre-open mic (will retry on record): {e}")
+
+        # Pre-warm the overlay: spawn it once now (paying the GTK startup cost at
+        # launch, not on the hotkey) so it shows instantly on the first record.
+        if settings.get("enableOverlay", True):
+            self._spawn_osd()
 
         # Keep the Hyprland push-to-talk binding in sync with the chosen hotkey,
         # applying it now and whenever the setting changes in the UI.
@@ -1839,19 +1914,29 @@ class VoiceDictationServer:
             logger.debug(f"Pre-warm failed: {e}")
 
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info: dict, status: int):
-        """Callback for audio stream."""
-        if not self.is_recording:
-            return
+        """Callback for audio stream.
 
+        Runs continuously while the (persistent) stream is open, not just during
+        a recording. Every chunk is retained in the rolling pre-roll so the lead
+        of an utterance isn't clipped; chunks are only committed to the recording
+        queue (and drive the overlay meter) while ``is_recording`` is set.
+        """
         if status:
             self._warn_stream_distress(f"Audio stream status: {status}")
 
+        chunk = indata.copy()
+        # Always keep the short pre-roll warm, even when idle.
+        self._preroll.append(chunk)
+
+        if not self.is_recording:
+            return
+
         try:
-            self.audio_queue.put_nowait(indata.copy())
+            self.audio_queue.put_nowait(chunk)
         except queue.Full:
             try:
                 self.audio_queue.get_nowait()
-                self.audio_queue.put_nowait(indata.copy())
+                self.audio_queue.put_nowait(chunk)
             except queue.Empty:
                 pass
             self._warn_stream_distress("Audio queue full, discarding oldest data")
@@ -1879,6 +1964,12 @@ class VoiceDictationServer:
 
     def _cleanup(self):
         """Clean up resources."""
+        # Dismiss the resident overlay so it doesn't linger after we exit.
+        try:
+            self._quit_osd()
+        except Exception:
+            pass
+
         if hasattr(self, "stream") and self.stream is not None:
             try:
                 self.stream.stop()
@@ -1928,10 +2019,24 @@ class VoiceDictationServer:
                 return str(path)
         return None
 
-    def _start_osd(self):
-        """Spawn the on-screen recording overlay (best-effort)."""
+    def _osd_send(self, msg: bytes):
+        """Send a control message to the overlay (best-effort, non-blocking)."""
+        if self._osd_send_sock is None:
+            return
+        try:
+            self._osd_send_sock.sendto(msg, str(OSD_SOCK))
+        except OSError:
+            pass
+
+    def _spawn_osd(self):
+        """Spawn the resident overlay process if it isn't already running.
+
+        The overlay stays alive for the server's lifetime and hides/shows on
+        command, so the GTK startup cost is paid once (at launch) rather than on
+        every hotkey press. Best-effort.
+        """
         if self._osd_proc is not None and self._osd_proc.poll() is None:
-            return  # already showing
+            return  # already resident
         script = self._osd_script()
         if not script:
             return
@@ -1954,14 +2059,25 @@ class VoiceDictationServer:
             logger.debug(f"Failed to start overlay: {e}")
             self._osd_proc = None
 
+    def _start_osd(self):
+        """Ensure the overlay is resident and reveal it for a new recording."""
+        self._spawn_osd()
+        self._osd_send(b"show")
+
     def _stop_osd(self):
-        """Tell the overlay to fade out and exit (it also idle-times-out)."""
-        if self._osd_send_sock is not None:
-            try:
-                self._osd_send_sock.sendto(b"stop", str(OSD_SOCK))
-            except OSError:
-                pass
+        """Hide the overlay; it stays resident (and warm) for the next record."""
+        self._osd_send(b"stop")
+
+    def _quit_osd(self):
+        """Tell the resident overlay to exit, then reap the process (shutdown)."""
+        self._osd_send(b"quit")
+        proc = self._osd_proc
         self._osd_proc = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     def _pause_media(self):
         """Pause any currently-playing MPRIS media players (music, video) so
@@ -1998,13 +2114,15 @@ class VoiceDictationServer:
                 continue
         self._paused_players = []
 
-    def _set_mic_volume(self, level="100%"):
+    def _set_mic_volume(self, level="110%"):
         """Force the default input source to a fixed level.
 
         Other apps (browsers, meeting tools, AGC) routinely lower the mic
         gain, which starves Whisper of signal and hurts accuracy. We re-assert
         this on every recording start so each dictation gets a strong, level
-        input. Overridable via OFLOW_MIC_VOLUME (e.g. "120%").
+        input. Defaults slightly above 100% so quiet/whispered speech still
+        carries enough signal; override via OFLOW_MIC_VOLUME (e.g. "130%" for a
+        very soft speaker, or "100%" to disable the boost).
         """
         level = os.getenv("OFLOW_MIC_VOLUME", level)
         try:
@@ -2024,7 +2142,6 @@ class VoiceDictationServer:
                 logger.debug("Already recording, ignoring start command")
                 return
 
-            self.is_recording = True
             self.audio_data = []
             self._last_stream_warn = 0.0
 
@@ -2035,18 +2152,26 @@ class VoiceDictationServer:
                 settings = load_settings()
 
                 # Show the on-screen recording overlay first, so it appears the
-                # instant the hotkey is pressed. Everything below warms up behind
-                # it (Popen returns immediately; the overlay renders in parallel).
+                # instant the hotkey is pressed. With a resident overlay this is a
+                # non-blocking "show" datagram; it renders in parallel.
                 if settings.get("enableOverlay", True):
                     self._start_osd()
 
-                # Re-assert mic gain — other apps/AGC may have lowered it since last time.
-                self._set_mic_volume()
+                # Ensure the mic stream is live. With PERSISTENT_MIC this is a
+                # no-op after startup; otherwise it opens on-demand here. Also
+                # self-heals a stream killed by a PipeWire/WirePlumber restart.
+                self._ensure_stream_open()
 
-                # Start audio stream on-demand (saves CPU when idle).
-                # Self-heals a stale PortAudio device list (e.g. after a
-                # PipeWire/WirePlumber restart) by reinitializing and retrying.
-                self.stream = self._open_audio_stream()
+                # Seed the recording with the pre-roll, then flip capture on, so
+                # the buffered leading audio lands *ahead* of the live chunks.
+                # Order matters: while is_recording is still False the callback
+                # won't enqueue, so nothing can interleave between the two.
+                for chunk in list(self._preroll):
+                    try:
+                        self.audio_queue.put_nowait(chunk)
+                    except queue.Full:
+                        break
+                self.is_recording = True
 
                 self.waybar_state.recording()
                 self.audio_feedback.play_start()
@@ -2054,6 +2179,11 @@ class VoiceDictationServer:
                 # Refresh the kept-warm connection now, while the user speaks,
                 # so a keep-alive that expired during idle is hot by release.
                 self._schedule_on_loop(self._prewarm_connection())
+
+                # Re-assert mic gain — other apps/AGC may have lowered it. Done
+                # after capture is live (and covered by the pre-roll) so its
+                # pactl round-trip can't clip the start of the utterance.
+                self._set_mic_volume()
 
                 self.text_processor = TextProcessor(
                     enable_punctuation=settings.get("enableSpokenPunctuation", False),
@@ -2081,6 +2211,29 @@ class VoiceDictationServer:
 
             logger.info("Recording started")
 
+    def _ensure_stream_open(self):
+        """Open the mic stream if it isn't already live (idempotent).
+
+        With PERSISTENT_MIC this is called once at startup and is a no-op on
+        every subsequent recording — except after a PipeWire/WirePlumber restart
+        leaves the stream dead, in which case the stale stream is dropped and a
+        fresh one opened (self-healing). Callers hold the recording lock.
+        """
+        if self.stream is not None:
+            try:
+                if self.stream.active:
+                    return
+            except Exception:
+                pass
+            # Present but inactive/stale — discard before reopening.
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        self.stream = self._open_audio_stream()
+
     def _open_audio_stream(self):
         """Open and start the input stream, recovering from a stale/empty
         PortAudio device list.
@@ -2102,7 +2255,7 @@ class VoiceDictationServer:
                 samplerate=SAMPLE_RATE,
                 channels=AUDIO_CHANNELS,
                 dtype=np.float32,
-                blocksize=1600,  # 100ms chunks → 10 callbacks/sec → 3000 chunks = 5 min
+                blocksize=AUDIO_BLOCKSIZE,  # 100ms chunks → 10 callbacks/sec → 3000 chunks = 5 min
                 callback=self._audio_callback,
             )
             stream.start()
@@ -2175,7 +2328,9 @@ class VoiceDictationServer:
         if self._recording_watchdog is not None:
             self._recording_watchdog.cancel()
             self._recording_watchdog = None
-        if self.stream is not None:
+        # Keep a persistent stream open (it's healthy — the failure was
+        # elsewhere); only tear it down in on-demand mode.
+        if not PERSISTENT_MIC and self.stream is not None:
             try:
                 self.stream.stop()
                 self.stream.close()
@@ -2230,8 +2385,10 @@ class VoiceDictationServer:
         # Tiny delay to let any in-flight callback complete
         time.sleep(0.03)
 
-        # Stop and close the audio stream
-        if self.stream is not None:
+        # Keep the stream open between dictations (persistent mic) so the next
+        # one has no open latency and a warm pre-roll. In on-demand mode, close
+        # it now to release the mic while idle.
+        if not PERSISTENT_MIC and self.stream is not None:
             try:
                 self.stream.stop()
                 self.stream.close()
