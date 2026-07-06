@@ -117,6 +117,9 @@ AUDIO_BLOCKSIZE = 1600  # 100ms chunks → 10 callbacks/sec (3000-chunk queue = 
 # the per-record PortAudio/PipeWire open latency — the main reason the first
 # words get clipped — and keeps the pre-roll buffer warm. Set false to fall back
 # to the old open-on-record behavior (mic only held while actually recording).
+# NOTE: auto-disabled at runtime when the default source is a Bluetooth device
+# (see _persistent_mic_wanted) — holding a BT mic open forces the headset from
+# high-quality A2DP to the low-quality HFP/HSP profile.
 PERSISTENT_MIC = os.getenv("OFLOW_PERSISTENT_MIC", "true").lower() == "true"
 # Rolling audio retained *before* the hotkey press, so speech that starts as
 # your finger comes down on the key isn't clipped. Only effective with a
@@ -1815,14 +1818,18 @@ class VoiceDictationServer:
 
         # Pre-warm the mic: open the stream now so the first dictation has no
         # open latency and the pre-roll is already filling. Best-effort — if no
-        # mic is present yet, recording start will retry and self-heal.
-        if PERSISTENT_MIC:
+        # mic is present yet, recording start will retry and self-heal. Skipped
+        # for a Bluetooth default source so we don't force it to a low-quality
+        # profile just by sitting idle.
+        if self._persistent_mic_wanted():
             try:
                 with self._recording_lock:
                     self._ensure_stream_open()
                 logger.info("Mic stream pre-opened (persistent)")
             except Exception as e:
                 logger.warning(f"Could not pre-open mic (will retry on record): {e}")
+        elif PERSISTENT_MIC:
+            logger.info("Persistent mic disabled (Bluetooth default source)")
 
         # Pre-warm the overlay: spawn it once now (paying the GTK startup cost at
         # launch, not on the hotkey) so it shows instantly on the first record.
@@ -2117,6 +2124,32 @@ class VoiceDictationServer:
                 continue
         self._paused_players = []
 
+    def _default_source_is_bluetooth(self) -> bool:
+        """True if the default input is a Bluetooth device.
+
+        Holding such a mic open forces the headset out of high-quality A2DP into
+        the low-quality HFP/HSP "headset" profile, so we must NOT keep it open
+        between dictations (see _persistent_mic_wanted). Best-effort: assumes
+        not-Bluetooth if it can't tell.
+        """
+        try:
+            src = subprocess.run(
+                ["pactl", "get-default-source"],
+                capture_output=True, text=True, timeout=2,
+            ).stdout.strip().lower()
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            return False
+        return src.startswith("bluez")
+
+    def _persistent_mic_wanted(self) -> bool:
+        """Whether to hold the mic open between dictations right now.
+
+        Honors PERSISTENT_MIC but backs off for a Bluetooth default source, so a
+        BT headset keeps its high-quality audio profile. Re-evaluated on each
+        record/stop, so plugging/unplugging a headset is handled live.
+        """
+        return PERSISTENT_MIC and not self._default_source_is_bluetooth()
+
     def _read_mic_volume(self) -> str | None:
         """Read the default source's current level as a percentage (e.g. "100%").
 
@@ -2372,8 +2405,8 @@ class VoiceDictationServer:
             self._recording_watchdog.cancel()
             self._recording_watchdog = None
         # Keep a persistent stream open (it's healthy — the failure was
-        # elsewhere); only tear it down in on-demand mode.
-        if not PERSISTENT_MIC and self.stream is not None:
+        # elsewhere); only tear it down in on-demand mode (incl. Bluetooth).
+        if not self._persistent_mic_wanted() and self.stream is not None:
             try:
                 self.stream.stop()
                 self.stream.close()
@@ -2430,9 +2463,10 @@ class VoiceDictationServer:
         time.sleep(0.03)
 
         # Keep the stream open between dictations (persistent mic) so the next
-        # one has no open latency and a warm pre-roll. In on-demand mode, close
-        # it now to release the mic while idle.
-        if not PERSISTENT_MIC and self.stream is not None:
+        # one has no open latency and a warm pre-roll. In on-demand mode — which
+        # includes a Bluetooth default source — close it now to release the mic
+        # while idle (a held-open BT mic drops the headset to low-quality audio).
+        if not self._persistent_mic_wanted() and self.stream is not None:
             try:
                 self.stream.stop()
                 self.stream.close()
