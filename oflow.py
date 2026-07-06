@@ -1769,8 +1769,11 @@ class VoiceDictationServer:
         # Set initial waybar state
         self.waybar_state.idle()
 
-        # Set mic volume (also re-asserted on every recording start)
-        self._set_mic_volume()
+        # Mic volume is boosted only *during* a recording and restored on stop
+        # (see _start_recording / _restore_mic_volume), so oflow never leaves the
+        # system mic altered for other apps like video calls. This holds the
+        # level we must put back.
+        self._saved_mic_volume: str | None = None
 
         # Audio stream (created on-demand, not always running)
         self.stream = None
@@ -2114,17 +2117,54 @@ class VoiceDictationServer:
                 continue
         self._paused_players = []
 
-    def _set_mic_volume(self, level="110%"):
-        """Force the default input source to a fixed level.
+    def _read_mic_volume(self) -> str | None:
+        """Read the default source's current level as a percentage (e.g. "100%").
 
-        Other apps (browsers, meeting tools, AGC) routinely lower the mic
-        gain, which starves Whisper of signal and hurts accuracy. We re-assert
-        this on every recording start so each dictation gets a strong, level
-        input. Defaults slightly above 100% so quiet/whispered speech still
-        carries enough signal; override via OFLOW_MIC_VOLUME (e.g. "130%" for a
-        very soft speaker, or "100%" to disable the boost).
+        Returns None if it can't be determined (old pactl, no PulseAudio/PipeWire,
+        parse miss) — callers then skip the restore rather than guess.
+        """
+        try:
+            out = subprocess.run(
+                ["pactl", "get-source-volume", "@DEFAULT_SOURCE@"],
+                capture_output=True, text=True, timeout=2,
+            ).stdout
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            return None
+        # e.g. "Volume: front-left: 65536 / 100% / 0.00 dB, front-right: ..."
+        m = re.search(r"/\s*(\d+)%", out)
+        return f"{m.group(1)}%" if m else None
+
+    def _set_mic_volume(self, level="110%"):
+        """Force the default input source to a fixed level, for the duration of a
+        recording only.
+
+        Other apps (browsers, meeting tools, AGC) routinely lower the mic gain,
+        which starves Whisper of signal and hurts accuracy. Boosting per-record
+        gives each dictation a strong, level input; the prior level is snapshotted
+        by the caller and put back by _restore_mic_volume on stop, so the system
+        mic is left exactly as we found it. Defaults slightly above 100% so quiet/
+        whispered speech still carries; override via OFLOW_MIC_VOLUME (e.g. "130%"
+        for a very soft speaker, or "100%" to disable the boost).
         """
         level = os.getenv("OFLOW_MIC_VOLUME", level)
+        try:
+            subprocess.run(
+                ["pactl", "set-source-volume", "@DEFAULT_SOURCE@", level],
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=2,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    def _restore_mic_volume(self):
+        """Put the mic level back to the value snapshotted before we boosted it,
+        so oflow doesn't leave the system mic altered for other apps (e.g. calls).
+        No-op if nothing was snapshotted."""
+        level = self._saved_mic_volume
+        self._saved_mic_volume = None
+        if not level:
+            return
         try:
             subprocess.run(
                 ["pactl", "set-source-volume", "@DEFAULT_SOURCE@", level],
@@ -2180,9 +2220,12 @@ class VoiceDictationServer:
                 # so a keep-alive that expired during idle is hot by release.
                 self._schedule_on_loop(self._prewarm_connection())
 
-                # Re-assert mic gain — other apps/AGC may have lowered it. Done
-                # after capture is live (and covered by the pre-roll) so its
-                # pactl round-trip can't clip the start of the utterance.
+                # Boost mic gain for this recording — other apps/AGC may have
+                # lowered it. Snapshot the current level first so _stop_recording
+                # can restore it (leaving the system mic untouched for calls).
+                # Done after capture is live (and covered by the pre-roll) so the
+                # pactl round-trips can't clip the start of the utterance.
+                self._saved_mic_volume = self._read_mic_volume()
                 self._set_mic_volume()
 
                 self.text_processor = TextProcessor(
@@ -2339,6 +2382,7 @@ class VoiceDictationServer:
             self.stream = None
         self.audio_data = []
         self._resume_media()
+        self._restore_mic_volume()
         self._stop_osd()
         try:
             self.waybar_state.idle()
@@ -2398,6 +2442,9 @@ class VoiceDictationServer:
 
         # Resume any media we paused, now that the mic is closed
         self._resume_media()
+        # Put the mic level back exactly as we found it (don't leave it boosted
+        # for other apps, e.g. video calls).
+        self._restore_mic_volume()
         # Dismiss the recording overlay
         self._stop_osd()
 
