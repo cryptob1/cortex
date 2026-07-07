@@ -105,6 +105,15 @@ MIN_AUDIO_DURATION_SECONDS = 0.5  # Minimum recording duration
 # afterwards, so this only needs to clear true silence/noise, not be loud.
 # Override with OFLOW_MIN_AMPLITUDE if your environment is noisier.
 MIN_AUDIO_AMPLITUDE = float(os.getenv("OFLOW_MIN_AMPLITUDE", "0.006"))
+# Speech-presence gate: the loudest 100ms frame must have at least this RMS
+# energy, else the clip is treated as no-speech and never sent to the STT model.
+# Unlike peak amplitude (which a single click trips), frame RMS reliably tells
+# sustained speech from a noise floor — the fix for mics whose steady background
+# noise sits at speech level and makes Whisper hallucinate ("Okay.", "Thank
+# you."). 0 disables it (default) since the right value is mic/room specific;
+# set OFLOW_MIN_SPEECH_RMS just above your measured silence floor. The per-clip
+# value is logged ("Audio level: …") so it can be calibrated from real usage.
+MIN_SPEECH_RMS = float(os.getenv("OFLOW_MIN_SPEECH_RMS", "0"))
 # Raw mic peak above which we trust a short transcription even if it matches a
 # stock hallucination phrase ("thank you", "subscribe"). Silence-hallucinations
 # come from near-silent clips; a loud, clear clip saying "thank you" is real.
@@ -651,6 +660,25 @@ class TextProcessor:
 # ============================================================================
 # Audio Processing
 # ============================================================================
+
+
+def loudest_frame_rms(audio: np.ndarray, frame_seconds: float = 0.1) -> float:
+    """RMS energy of the loudest ~frame_seconds window — a speech-presence signal.
+
+    Peak amplitude is fooled by a single click; averaging energy over a frame is
+    not, so this distinguishes sustained (even whispered) speech from a steady
+    noise floor far better. Returns the max frame RMS, i.e. "is there ANY
+    speech-energy region?", so a mostly-silent clip with a burst of real speech
+    still scores high while uniform noise stays low.
+    """
+    if len(audio) == 0:
+        return 0.0
+    frame = max(1, int(frame_seconds * SAMPLE_RATE))
+    n = len(audio) // frame
+    if n == 0:
+        return float(np.sqrt(np.mean(audio**2)))
+    frames = audio[: n * frame].reshape(n, frame)
+    return float(np.sqrt(np.mean(frames**2, axis=1)).max())
 
 
 class AudioValidator:
@@ -2582,6 +2610,23 @@ class VoiceDictationServer:
         valid, error = AudioValidator.validate(audio)
         if not valid:
             logger.warning(f"Audio validation failed: {error}")
+            self.waybar_state.idle()
+            return
+
+        # Speech-presence gate. Logged for every clip so the threshold can be
+        # calibrated from real usage; when configured (>0), a clip whose loudest
+        # frame is below it is treated as no-speech and never sent to the STT
+        # model — the fix for a noisy mic where Whisper hallucinates on silence.
+        speech_rms = loudest_frame_rms(audio)
+        logger.info(
+            f"Audio level: loudest_frame_rms={speech_rms:.4f}, peak={np.max(np.abs(audio)):.4f} "
+            f"(speech gate={MIN_SPEECH_RMS or 'off'})"
+        )
+        if MIN_SPEECH_RMS > 0 and speech_rms < MIN_SPEECH_RMS:
+            logger.info(
+                f"No speech detected (frame RMS {speech_rms:.4f} < {MIN_SPEECH_RMS}); "
+                "skipping transcription"
+            )
             self.waybar_state.idle()
             return
 
