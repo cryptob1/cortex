@@ -126,6 +126,11 @@ PERSISTENT_MIC = os.getenv("OFLOW_PERSISTENT_MIC", "true").lower() == "true"
 # persistent stream (otherwise the stream isn't open yet to fill it).
 PREROLL_SECONDS = float(os.getenv("OFLOW_PREROLL_SECONDS", "0.5"))
 PREROLL_CHUNKS = max(1, round(PREROLL_SECONDS * SAMPLE_RATE / AUDIO_BLOCKSIZE))
+# A healthy stream fires the audio callback every ~100ms (AUDIO_BLOCKSIZE). If a
+# persistent stream goes this long with no callback it's a zombie (e.g. never
+# resumed after suspend) and must be reopened, even if PortAudio still calls it
+# "active". Comfortably above the 100ms cadence to avoid false positives.
+STREAM_STALE_SECONDS = 1.0
 AUDIO_OPEN_MAX_ATTEMPTS = 4  # Retries opening the mic (PortAudio reinit) before giving up
 AUDIO_OPEN_RETRY_DELAY = 0.3  # Seconds between mic-open attempts, to let the audio server settle
 STREAM_WARN_INTERVAL_SECONDS = 5.0  # Throttle audio-stream distress warnings
@@ -1751,6 +1756,9 @@ class VoiceDictationServer:
         # recording instead of being lost. Fed on every callback; bounded, so it
         # self-trims. Only meaningful with a persistent stream (PERSISTENT_MIC).
         self._preroll: deque[np.ndarray] = deque(maxlen=PREROLL_CHUNKS)
+        # Monotonic time of the last audio callback — a heartbeat used to detect
+        # a zombie stream that stopped delivering audio (e.g. after suspend).
+        self._last_callback_ts = 0.0
         # Characters left on screen by the last dictation, so "scratch that" in a
         # following dictation can delete them.
         self._last_output_chars = 0
@@ -1933,6 +1941,10 @@ class VoiceDictationServer:
         """
         if status:
             self._warn_stream_distress(f"Audio stream status: {status}")
+
+        # Heartbeat: lets _ensure_stream_open detect a zombie stream (still
+        # "active" but no longer delivering callbacks, e.g. after a suspend).
+        self._last_callback_ts = time.monotonic()
 
         chunk = indata.copy()
         # Always keep the short pre-roll warm, even when idle.
@@ -2291,24 +2303,46 @@ class VoiceDictationServer:
         """Open the mic stream if it isn't already live (idempotent).
 
         With PERSISTENT_MIC this is called once at startup and is a no-op on
-        every subsequent recording — except after a PipeWire/WirePlumber restart
-        leaves the stream dead, in which case the stale stream is dropped and a
-        fresh one opened (self-healing). Callers hold the recording lock.
+        every subsequent recording — except when the stream has died, in which
+        case the stale stream is dropped and a fresh one opened (self-healing).
+
+        Two death modes are handled:
+          - PortAudio reports the stream inactive (device removed / server
+            restart) — caught by the ``active`` check.
+          - The stream is a *zombie*: still ``active`` but delivering no
+            callbacks. This happens after a suspend/resume on a long-lived
+            persistent stream — PortAudio never resumes it, so the callback
+            stops firing and only the (now frozen) pre-roll is ever captured.
+            We detect it by the gap since the last callback: when healthy the
+            callback fires every ~100ms, so a gap past STREAM_STALE_SECONDS means
+            the stream is dead even though ``active`` still says otherwise.
+
+        Callers hold the recording lock.
         """
         if self.stream is not None:
+            alive = False
             try:
-                if self.stream.active:
-                    return
+                gap = time.monotonic() - self._last_callback_ts
+                alive = bool(self.stream.active) and gap <= STREAM_STALE_SECONDS
             except Exception:
-                pass
-            # Present but inactive/stale — discard before reopening.
+                alive = False
+            if alive:
+                return
+            # Inactive or zombie (no callbacks) — discard before reopening. The
+            # pre-roll it left behind is stale (possibly from before a suspend),
+            # so drop it; a fresh stream refills it with live audio.
+            logger.info("Mic stream stale/dead — reopening")
             try:
                 self.stream.stop()
                 self.stream.close()
             except Exception:
                 pass
             self.stream = None
+            self._preroll.clear()
         self.stream = self._open_audio_stream()
+        # Grace: the fresh stream hasn't fired a callback yet, so don't let the
+        # staleness check above trip on the next call before audio starts flowing.
+        self._last_callback_ts = time.monotonic()
 
     def _open_audio_stream(self):
         """Open and start the input stream, recovering from a stale/empty
