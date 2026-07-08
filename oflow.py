@@ -122,14 +122,16 @@ CHUNK_DURATION_SECONDS = 25  # Max chunk duration for Whisper (split long audio)
 CHUNK_SPLIT_WINDOW_SECONDS = 3  # Window to search for silence near split point
 MAX_RECORDING_SECONDS = 300  # Auto-stop runaway recordings to prevent leaks from stuck state
 AUDIO_BLOCKSIZE = 1600  # 100ms chunks → 10 callbacks/sec (3000-chunk queue = 5 min)
-# Keep a persistent input stream open across dictations (default). This removes
-# the per-record PortAudio/PipeWire open latency — the main reason the first
-# words get clipped — and keeps the pre-roll buffer warm. Set false to fall back
-# to the old open-on-record behavior (mic only held while actually recording).
-# NOTE: auto-disabled at runtime when the default source is a Bluetooth device
-# (see _persistent_mic_wanted) — holding a BT mic open forces the headset from
-# high-quality A2DP to the low-quality HFP/HSP profile.
-PERSISTENT_MIC = os.getenv("OFLOW_PERSISTENT_MIC", "true").lower() == "true"
+# Open the mic on demand — only while actually recording (default). Trades a
+# little start latency / pre-roll for zero idle cost. The old always-open stream
+# removed the per-record PortAudio open latency, but a persistent stream turns
+# into a CPU-spinning zombie after a suspend/resume (PortAudio never resumes it),
+# and on-demand feels indistinguishable in practice. Set OFLOW_PERSISTENT_MIC=true
+# to keep the stream warm across dictations.
+# NOTE: persistent mode is additionally auto-disabled when the default source is
+# a Bluetooth device (see _persistent_mic_wanted) — holding a BT mic open forces
+# the headset from high-quality A2DP to the low-quality HFP/HSP profile.
+PERSISTENT_MIC = os.getenv("OFLOW_PERSISTENT_MIC", "false").lower() == "true"
 # Rolling audio retained *before* the hotkey press, so speech that starts as
 # your finger comes down on the key isn't clipped. Only effective with a
 # persistent stream (otherwise the stream isn't open yet to fill it).
