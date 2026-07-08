@@ -1441,6 +1441,51 @@ def _paste_chord() -> list[str]:
     return ctrl_v
 
 
+def _clipboard_ready(text: str, timeout: float = 0.2) -> bool:
+    """Poll wl-paste until the clipboard actually serves `text` (or timeout).
+
+    wl-copy returns before the content is necessarily readable by other clients;
+    pasting into that gap silently inserts nothing. This closes the race.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            got = subprocess.run(
+                ["wl-paste", "--no-newline"], capture_output=True, timeout=1
+            ).stdout
+        except (subprocess.SubprocessError, OSError):
+            return False
+        if got.decode("utf-8", "replace") == text:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _active_window_desc() -> str:
+    """Short 'class "title"' of the focused window — so a vanished paste's target
+    is visible in the log (right window but empty clipboard, or the wrong window)."""
+    try:
+        out = subprocess.run(
+            ["hyprctl", "activewindow", "-j"], capture_output=True, text=True, timeout=2
+        ).stdout
+        w = json.loads(out)
+        return f'{w.get("class", "?")} "{(w.get("title", "") or "")[:40]}"'
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return "unknown"
+
+
+def _notify(title: str, body: str = "") -> None:
+    """Best-effort desktop notification. Visible even when audio feedback is themed
+    'silent', so a failed dictation isn't an invisible no-op."""
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "oflow", "-u", "critical", title, body],
+            check=False, timeout=2, stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        pass
+
+
 def _paste_text(text: str) -> bool:
     """Insert text in one shot via the clipboard + a single paste keystroke.
 
@@ -1460,6 +1505,11 @@ def _paste_text(text: str) -> bool:
     chord = _paste_chord()
     try:
         subprocess.run(["wl-copy"], input=text.encode(), check=True, timeout=5)
+        # Wait for the clipboard to actually serve the new text before firing the
+        # paste key — wl-copy returns early, and pasting into that gap silently
+        # inserts nothing (the intermittent "dictation vanished" on fast takes).
+        if not _clipboard_ready(text):
+            logger.warning("Clipboard not confirmed before paste — text may not have landed")
         subprocess.run(
             ["ydotool", "key", *chord],
             check=True, stderr=subprocess.DEVNULL, timeout=5,
@@ -1468,7 +1518,7 @@ def _paste_text(text: str) -> bool:
         logger.warning(f"Paste failed ({type(e).__name__}: {e}); falling back to typing")
         return False
 
-    logger.info(f"Pasted {len(text)} chars (chord={'+'.join(chord)})")
+    logger.info(f"Pasted {len(text)} chars (chord={'+'.join(chord)}) -> {_active_window_desc()}")
 
     # Restore the prior clipboard once the paste has consumed our offer. The delay
     # avoids a race where apps that read the selection lazily get the old data.
@@ -2366,7 +2416,12 @@ class VoiceDictationServer:
             except Exception:
                 pass
             self.stream = None
-            self._preroll.clear()
+        # A freshly opened stream carries no valid pre-roll: whatever sits in the
+        # deque is stale — the frozen tail of the previous recording when the mic
+        # opens on-demand (PERSISTENT_MIC off), or pre-suspend audio from a zombie
+        # stream. Drop it so it can't bleed into the next recording. A healthy
+        # persistent stream returns above, keeping its real live leading audio.
+        self._preroll.clear()
         self.stream = self._open_audio_stream()
         # Grace: the fresh stream hasn't fired a callback yet, so don't let the
         # staleness check above trip on the next call before audio starts flowing.
@@ -2665,6 +2720,7 @@ class VoiceDictationServer:
             )
             self.waybar_state.error("No text")
             self.audio_feedback.play_error()
+            _notify("Dictation failed", "No text — network/API timeout or nothing recognized. Try again.")
             return
 
         logger.info(f"Transcription: {(t1 - t0) * 1000:.0f}ms | Raw: {raw_text[:80]}")
