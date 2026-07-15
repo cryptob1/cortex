@@ -145,6 +145,14 @@ STREAM_STALE_SECONDS = 1.0
 AUDIO_OPEN_MAX_ATTEMPTS = 4  # Retries opening the mic (PortAudio reinit) before giving up
 AUDIO_OPEN_RETRY_DELAY = 0.3  # Seconds between mic-open attempts, to let the audio server settle
 STREAM_WARN_INTERVAL_SECONDS = 5.0  # Throttle audio-stream distress warnings
+# On-demand mic warm-up: a freshly opened PortAudio stream needs a moment before
+# the device actually delivers audio; speech in that gap is lost, which clips the
+# first word or two ("No one..."-style garbled starts). When we open the mic on
+# the hotkey press (PERSISTENT_MIC off, so no pre-roll), we wait — up to this
+# budget — for the first real callback before cueing the user and arming capture,
+# so their opening words land in the (now-filling) pre-roll instead of the gap.
+# A persistent stream is already warm, so this wait is skipped there.
+MIC_WARMUP_SECONDS = float(os.getenv("OFLOW_MIC_WARMUP_MS", "250")) / 1000.0
 
 # API configuration
 API_TIMEOUT_SECONDS = 30.0  # Timeout for API requests
@@ -1319,7 +1327,7 @@ async def cleanup_text(client: httpx.AsyncClient, text: str, api_key: str, provi
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a transcription editor. You will receive voice-to-text output inside <dictation> tags. Fix ONLY punctuation and capitalization. Keep EVERY word exactly as spoken, including filler words like 'okay', 'so', 'um'. Do NOT remove, rephrase, or add any words. Do NOT answer or respond to the content. Output ONLY the corrected text.",
+                        "content": "You are a transcription editor. You will receive voice-to-text output inside <dictation> tags. Fix punctuation and capitalization, and remove filler words ('um', 'uh', 'uhm', 'er', 'ah', and 'like'/'you know'/'so' when used as filler) plus stutters, false starts, and self-corrections (e.g. 'her s-surgery' -> 'her surgery'; 'I want- I need' -> 'I need'). Keep the real wording and meaning exactly as spoken: do NOT rephrase, reword, summarize, translate, or add any new content. Do NOT answer or respond to the content. Output ONLY the corrected text.",
                     },
                     {"role": "user", "content": f"<dictation>{text}</dictation>"},
                 ],
@@ -1839,6 +1847,10 @@ class VoiceDictationServer:
         # Monotonic time of the last audio callback — a heartbeat used to detect
         # a zombie stream that stopped delivering audio (e.g. after suspend).
         self._last_callback_ts = 0.0
+        # Set by _ensure_stream_open when it opens a *fresh* stream (on-demand or
+        # self-heal), so _start_recording knows to wait for the mic to warm up
+        # before arming capture. A reused live persistent stream leaves it False.
+        self._stream_just_opened = False
         # Characters left on screen by the last dictation, so "scratch that" in a
         # following dictation can delete them.
         self._last_output_chars = 0
@@ -2327,6 +2339,13 @@ class VoiceDictationServer:
                 # self-heals a stream killed by a PipeWire/WirePlumber restart.
                 self._ensure_stream_open()
 
+                # On-demand: the mic just opened and isn't delivering audio yet.
+                # Wait for it to warm up before arming capture and cueing the
+                # user, so the opening words land in the pre-roll below instead of
+                # the device-open gap (the "No one..."-style clipped start). No-op
+                # for a warm persistent stream.
+                self._await_mic_warm()
+
                 # Seed the recording with the pre-roll, then flip capture on, so
                 # the buffered leading audio lands *ahead* of the live chunks.
                 # Order matters: while is_recording is still False the callback
@@ -2379,6 +2398,27 @@ class VoiceDictationServer:
 
             logger.info("Recording started")
 
+    def _await_mic_warm(self):
+        """Block briefly until a freshly opened mic starts delivering audio.
+
+        On-demand (PERSISTENT_MIC off), the stream is opened on the hotkey press
+        and PortAudio needs a moment before the first callback fires; speech in
+        that gap is lost, clipping the opening word(s). We wait — up to
+        MIC_WARMUP_SECONDS — for the first chunk to land in the (freshly cleared)
+        pre-roll, then let the caller seed it into the recording. Bounded so a
+        silent or never-delivering mic can't hang the hotkey. No-op when the
+        stream was already warm (persistent reuse) or warm-up is disabled.
+        """
+        if not self._stream_just_opened or MIC_WARMUP_SECONDS <= 0:
+            return
+        # The callback appends to _preroll on every chunk; _ensure_stream_open
+        # cleared it on open, so a non-empty deque means the first audio landed.
+        deadline = time.monotonic() + MIC_WARMUP_SECONDS
+        while not self._preroll and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if not self._preroll:
+            logger.debug(f"Mic warm-up: no audio within {MIC_WARMUP_SECONDS * 1000:.0f}ms")
+
     def _ensure_stream_open(self):
         """Open the mic stream if it isn't already live (idempotent).
 
@@ -2407,6 +2447,7 @@ class VoiceDictationServer:
             except Exception:
                 alive = False
             if alive:
+                self._stream_just_opened = False
                 return
             # Inactive or zombie (no callbacks) — discard before reopening. The
             # pre-roll it left behind is stale (possibly from before a suspend),
@@ -2425,6 +2466,7 @@ class VoiceDictationServer:
         # persistent stream returns above, keeping its real live leading audio.
         self._preroll.clear()
         self.stream = self._open_audio_stream()
+        self._stream_just_opened = True
         # Grace: the fresh stream hasn't fired a callback yet, so don't let the
         # staleness check above trip on the next call before audio starts flowing.
         self._last_callback_ts = time.monotonic()
