@@ -90,3 +90,24 @@ def add_note(text: str, timestamp: datetime | None = None) -> Path:
     _commit(vault, day_file, f"note: {ts:%Y-%m-%d %H:%M}")
     logger.info(f"Note saved to {day_file}")
     return day_file
+
+
+def add_meeting(transcript: str, summary: str, timestamp: datetime | None = None) -> Path:
+    """Write a meeting (summary + full transcript) to its own Markdown file and
+    commit it. One file per meeting under ``meetings/``. Returns the file path."""
+    ts = timestamp or datetime.now()
+    vault = _vault()
+    meetings_dir = vault / "meetings"
+    meetings_dir.mkdir(parents=True, exist_ok=True)
+    mfile = meetings_dir / f"{ts:%Y-%m-%d-%H%M}.md"
+
+    with open(mfile, "w") as f:
+        f.write(f"---\ncreated: {ts.isoformat()}\ntype: meeting\nsource: oflow\n---\n\n")
+        f.write(f"# Meeting — {ts:%Y-%m-%d %H:%M}\n\n")
+        if summary.strip():
+            f.write(f"{summary.strip()}\n\n")
+        f.write(f"## Transcript\n\n{transcript.strip()}\n")
+
+    _commit(vault, mfile, f"meeting: {ts:%Y-%m-%d %H:%M}")
+    logger.info(f"Meeting saved to {mfile}")
+    return mfile

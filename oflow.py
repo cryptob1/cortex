@@ -1357,6 +1357,61 @@ async def cleanup_text(client: httpx.AsyncClient, text: str, api_key: str, provi
     return text
 
 
+MEETING_SUMMARY_PROMPT = (
+    "You are a meeting-notes assistant. You are given a raw meeting transcript "
+    "(imperfect punctuation, no speaker labels). Produce concise Markdown notes with "
+    "these sections, each as a level-2 heading: '## Summary' (2-4 sentences), "
+    "'## Key points' (bullets), '## Decisions' (bullets; omit the section if none), and "
+    "'## Action items' (bullets formatted '- [ ] task'; omit if none). Be faithful to the "
+    "transcript — do not invent facts, names, or numbers. Output only the Markdown notes."
+)
+
+
+async def summarize_meeting(
+    client: httpx.AsyncClient, transcript: str, api_key: str, provider: str
+) -> str:
+    """Summarize a meeting transcript into structured Markdown notes via an LLM.
+
+    Returns "" on any failure — the caller still stores the full transcript, so a
+    failed summary never loses the meeting.
+    """
+    if not transcript or len(transcript) < 20:
+        return ""
+    if provider == "groq":
+        url, model = GROQ_CHAT_URL, "llama-3.3-70b-versatile"
+    else:
+        url, model = OPENAI_CHAT_URL, "gpt-4o-mini"
+    try:
+        response = await _post_with_retry(
+            client,
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": MEETING_SUMMARY_PROMPT},
+                    {"role": "user", "content": transcript},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 1024,
+            },
+        )
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"].strip()
+        logger.error(f"Meeting summary failed: HTTP {response.status_code}")
+    except Exception as e:
+        logger.error(f"Meeting summary error: {e}")
+    return ""
+
+
+def load_wav_mono(path: str) -> np.ndarray:
+    """Load a 16-bit PCM mono WAV (as recorded for meetings) into a float32 array
+    normalized to [-1, 1] at the source sample rate."""
+    with wave.open(path, "rb") as w:
+        frames = w.readframes(w.getnframes())
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 # ============================================================================
 # Text Output
 # ============================================================================
@@ -1873,6 +1928,13 @@ class VoiceDictationServer:
         # stop the recording — only a second Copilot+N does — so the user needn't
         # hold the combo. Reset on every start and stop.
         self._note_session = False
+        # Meeting recording (Copilot+M toggle). Unlike dictation/notes, a meeting
+        # captures a system+mic mix to a file via PipeWire + pw-record, so it has
+        # its own state rather than reusing the mic InputStream pipeline.
+        self._meeting_active = False
+        self._meeting_modules: list[str] = []   # pactl module ids to unload on stop
+        self._meeting_proc: subprocess.Popen | None = None
+        self._meeting_wav: str | None = None
 
         # Load settings
         settings = load_settings()
@@ -2100,6 +2162,18 @@ class VoiceDictationServer:
         # Dismiss the resident overlay so it doesn't linger after we exit.
         try:
             self._quit_osd()
+        except Exception:
+            pass
+
+        # Stop a meeting recorder and release its PipeWire modules so we don't
+        # leak virtual sinks on exit.
+        if getattr(self, "_meeting_proc", None) is not None:
+            try:
+                self._meeting_proc.terminate()
+            except Exception:
+                pass
+        try:
+            self._meeting_teardown_mix()
         except Exception:
             pass
 
@@ -2725,6 +2799,149 @@ class VoiceDictationServer:
             self.waybar_state.error("Note save failed")
             self.audio_feedback.play_error()
 
+    def _cancel_recording(self):
+        """Abort an in-flight mic recording, discarding its audio (no transcribe or
+        paste). Used to kill the spurious dictation that a Copilot key-press starts
+        when the user actually meant Copilot+M (meeting)."""
+        with self._recording_lock:
+            if not self.is_recording:
+                return
+            self._note_session = False
+            self._rollback_recording()
+            logger.info("Cancelled in-flight dictation (meeting toggle)")
+
+    def _meeting_setup_mix(self) -> str:
+        """Load a PipeWire null-sink mixing system output + mic; return the node to
+        record from. Records the loaded module ids for teardown."""
+        def _default(kind: str) -> str:
+            return subprocess.run(
+                ["pactl", f"get-default-{kind}"], capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+
+        def _load(*args: str) -> None:
+            out = subprocess.run(
+                ["pactl", "load-module", *args],
+                capture_output=True, text=True, timeout=5, check=True,
+            ).stdout.strip()
+            self._meeting_modules.append(out)
+
+        sink, source = _default("sink"), _default("source")
+        self._meeting_modules = []
+        _load("module-null-sink", "sink_name=oflow_recmix",
+              "sink_properties=device.description=OflowRecMix")
+        _load("module-loopback", f"source={sink}.monitor", "sink=oflow_recmix", "latency_msec=20")
+        _load("module-loopback", f"source={source}", "sink=oflow_recmix", "latency_msec=20")
+        return "oflow_recmix.monitor"
+
+    def _meeting_teardown_mix(self):
+        """Unload the PipeWire modules from _meeting_setup_mix (best-effort)."""
+        for mod in reversed(self._meeting_modules):
+            subprocess.run(["pactl", "unload-module", mod], capture_output=True, timeout=5)
+        self._meeting_modules = []
+
+    def _start_meeting(self):
+        """Start recording a system+mic meeting mix to a WAV via pw-record."""
+        with self._recording_lock:
+            if self._meeting_active:
+                return
+            try:
+                target = self._meeting_setup_mix()
+                RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+                self._meeting_wav = str(RUNTIME_DIR / "meeting.wav")
+                self._meeting_proc = subprocess.Popen(
+                    ["pw-record", "--target", target, "--rate", str(SAMPLE_RATE),
+                     "--channels", "1", self._meeting_wav],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                self._meeting_active = True
+                self.waybar_state.recording()
+                self.audio_feedback.play_start()
+                _notify("🎙️ Recording meeting", "Press Copilot+M again to stop and summarize.")
+                logger.info(f"Meeting recording started → {self._meeting_wav}")
+            except Exception:
+                logger.exception("Failed to start meeting; tearing down")
+                self._meeting_teardown_mix()
+                self._meeting_active = False
+                self.waybar_state.error("Meeting failed")
+                self.audio_feedback.play_error()
+
+    def _stop_meeting(self):
+        """Stop the meeting recorder, release the mix, and process the audio."""
+        with self._recording_lock:
+            if not self._meeting_active:
+                return
+            self._meeting_active = False
+            proc, wav = self._meeting_proc, self._meeting_wav
+            self._meeting_proc = None
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        self._meeting_teardown_mix()
+        self.audio_feedback.play_stop()
+        self.waybar_state.transcribing()
+        logger.info("Meeting recording stopped; transcribing")
+        self._run_on_loop(self._process_meeting(wav))
+
+    async def _process_meeting(self, wav_path: str | None):
+        """Transcribe a recorded meeting, summarize it, and save both to the brain."""
+        if not wav_path or not Path(wav_path).exists():
+            logger.error("Meeting audio missing; nothing to process")
+            self.waybar_state.idle()
+            return
+        settings = load_settings()
+        provider = settings.get("provider", "groq")
+        api_key = get_provider_key(settings, provider)
+        if not api_key:
+            self.waybar_state.error("API key not set")
+            self.audio_feedback.play_error()
+            return
+        try:
+            audio = load_wav_mono(wav_path)
+        finally:
+            # We have the audio in memory now — drop the temp file either way.
+            try:
+                Path(wav_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+        duration = len(audio) / SAMPLE_RATE
+        logger.info(f"Processing {duration:.0f}s meeting audio")
+
+        client = self._client
+        if client is None:  # loop torn down mid-shutdown
+            self.waybar_state.idle()
+            return
+
+        raw = await transcribe_audio_chunked(client, audio, api_key, provider)
+        if not raw:
+            logger.error("Meeting transcription produced no text")
+            self.waybar_state.error("No text")
+            self.audio_feedback.play_error()
+            return
+
+        cleanup_provider, cleanup_key = resolve_cleanup_provider(settings, provider, api_key)
+        summary = ""
+        if cleanup_key:
+            summary = await summarize_meeting(client, raw, cleanup_key, cleanup_provider)
+
+        if not _HAS_BRAIN:
+            logger.error("Meeting recorded but brain module unavailable")
+            self.waybar_state.error("Brain unavailable")
+            self.audio_feedback.play_error()
+            return
+        try:
+            path = brain.add_meeting(raw, summary)
+            _notify("📝 Meeting saved", f"{duration / 60:.0f} min → {path.name}")
+            logger.info(f"Meeting saved → {path}")
+        except Exception:
+            logger.exception("Failed to save meeting to brain")
+            self.waybar_state.error("Meeting save failed")
+            self.audio_feedback.play_error()
+            return
+        self.waybar_state.idle()
+
     async def _process_transcription(self):
         """Process recorded audio: transcribe, clean up, and type result."""
         settings = load_settings()
@@ -2914,6 +3131,15 @@ class VoiceDictationServer:
                             logger.info("Note session ended by toggle; saving")
                             self._note_session = False
                             self._stop_recording()
+                    elif cmd == "meeting":
+                        # Copilot+M toggles a meeting. The Copilot key-down already
+                        # fired `start`, spawning a spurious mic dictation — cancel
+                        # it (discard, no paste) before toggling the meeting.
+                        self._cancel_recording()
+                        if self._meeting_active:
+                            self._stop_meeting()
+                        else:
+                            self._start_meeting()
                 except Exception:
                     # A failed recording must never tear down the IPC server,
                     # otherwise the global shortcut goes permanently dead until
@@ -3035,9 +3261,9 @@ def main() -> None:
     if len(sys.argv) > 1:
         cmd = sys.argv[1]
 
-        if cmd not in ("start", "stop", "toggle", "note"):
+        if cmd not in ("start", "stop", "toggle", "note", "meeting"):
             print(f"Unknown command: {cmd}", file=sys.stderr)
-            print("Usage: oflow [start|stop|toggle|note]", file=sys.stderr)
+            print("Usage: oflow [start|stop|toggle|note|meeting]", file=sys.stderr)
             sys.exit(1)
 
         try:
