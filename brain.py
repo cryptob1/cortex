@@ -15,6 +15,7 @@ Config (env, loadable via oflow's .env):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -23,22 +24,40 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Config is read lazily (per call) so it reflects env loaded via oflow's .env,
-# which is applied after this module is imported.
+SETTINGS_FILE = Path.home() / ".oflow" / "settings.json"
+
+# Config is read lazily (per call) so it reflects both env (advanced overrides,
+# loaded via oflow's .env after this module is imported) and settings.json (what
+# the UI writes). Precedence: env var > settings.json > built-in default.
+
+
+def _settings() -> dict:
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except Exception:
+        return {}
 
 
 def _vault() -> Path:
     """Vault root — a folder of Markdown files. Point Obsidian at it; `git init` for sync."""
-    return Path(os.environ.get("OFLOW_BRAIN_DIR", str(Path.home() / "brain"))).expanduser()
+    env = os.environ.get("OFLOW_BRAIN_DIR")
+    path = env or _settings().get("brainVaultPath") or str(Path.home() / "brain")
+    return Path(path).expanduser()
 
 
 def _git_enabled() -> bool:
     """Auto-commit each capture when the vault is a git repo. Push is opt-in."""
-    return os.environ.get("OFLOW_BRAIN_GIT", "true").lower() == "true"
+    env = os.environ.get("OFLOW_BRAIN_GIT")
+    if env is not None:
+        return env.lower() == "true"
+    return bool(_settings().get("brainGit", True))
 
 
 def _git_push_enabled() -> bool:
-    return os.environ.get("OFLOW_BRAIN_GIT_PUSH", "false").lower() == "true"
+    env = os.environ.get("OFLOW_BRAIN_GIT_PUSH")
+    if env is not None:
+        return env.lower() == "true"
+    return bool(_settings().get("brainGitPush", False))
 
 
 def _is_git_repo(vault: Path) -> bool:

@@ -24,6 +24,10 @@ export interface Settings {
     fastModeMaxWords?: number;
     audioFeedbackTheme?: string;
     submitKeywords?: string[];
+    // Second brain (note & meeting capture)
+    brainVaultPath?: string;
+    brainGit?: boolean;
+    brainGitPush?: boolean;
 }
 
 /**

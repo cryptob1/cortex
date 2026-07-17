@@ -195,12 +195,17 @@ async fn set_shortcut(
     let contents = std::fs::read_to_string(&bindings_file)
         .map_err(|e| format!("Failed to read bindings file: {}", e))?;
 
-    // Remove old oflow bindings
+    // Remove old oflow bindings — match every line the oflow block emits: its
+    // comment(s), the start/stop bind(d)/bindr lines, and the note/meeting
+    // bind/unbind lines (all invoke oflow-ctl; older builds used oflow.py).
     let new_lines: Vec<&str> = contents
         .lines()
         .filter(|line| {
-            !line.contains("# Oflow voice dictation") && 
-            !(line.starts_with("bind") && line.contains("oflow.py"))
+            !line.contains("# Oflow voice dictation")
+                && !line.contains("oflow-ctl")
+                && !line.contains("oflow.py")
+                && !line.contains("SUPER SHIFT, N")
+                && !line.contains("SUPER SHIFT, M")
         })
         .collect();
 
@@ -216,12 +221,21 @@ async fn set_shortcut(
             .replace("Alt+", "ALT ")
     };
 
-    // Add new bindings using oflow-ctl helper script
+    // Add new bindings using oflow-ctl helper script. Note & meeting capture ride
+    // on the Copilot key (which holds Super+Shift), so include them when binding
+    // that key — mirrors scripts/oflow-hotkey so the two generators stay in sync.
+    let is_copilot = shortcut.starts_with("XF86") || shortcut.contains("F23");
+    let brain_binds = if is_copilot {
+        "\nunbind = SUPER SHIFT, N\nbind = SUPER SHIFT, N, exec, oflow-ctl note\nunbind = SUPER SHIFT, M\nbind = SUPER SHIFT, M, exec, oflow-ctl meeting"
+    } else {
+        ""
+    };
     let new_bindings = format!(
-        "\n# Oflow voice dictation (push-to-talk: hold {} to record, release to stop)\nbind = {}, exec, oflow-ctl start\nbindr = {}, exec, oflow-ctl stop",
+        "\n# Oflow voice dictation (push-to-talk: hold {} to record, release to stop)\nbind = {}, exec, oflow-ctl start\nbindr = {}, exec, oflow-ctl stop{}",
         shortcut,
         hypr_shortcut,
-        hypr_shortcut
+        hypr_shortcut,
+        brain_binds
     );
 
     let mut final_content = new_lines.join("\n");

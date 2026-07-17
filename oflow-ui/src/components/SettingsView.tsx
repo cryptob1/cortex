@@ -5,7 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { loadSettings, saveSettings, clearHistory, type Settings } from "@/lib/api";
-import { Eye, EyeOff, Shield, Zap, Keyboard } from "lucide-react";
+import { Eye, EyeOff, Shield, Zap, Keyboard, Brain } from "lucide-react";
 import { useToast } from "@/components/ui/toast";
 
 // Mirrors SPOKEN_ACTIONS in oflow.py. Shown read-only so users can see what
@@ -43,6 +43,7 @@ export function SettingsView() {
     const [submitKeywordsInput, setSubmitKeywordsInput] = useState("press enter, hit enter");
     const [fastWordsInput, setFastWordsInput] = useState("8");
     const [wakeWordInput, setWakeWordInput] = useState("jarvis");
+    const [vaultPathInput, setVaultPathInput] = useState("~/brain");
     const wakeWord = (settings.commandWakeWord || "jarvis").trim() || "jarvis";
 
     useEffect(() => {
@@ -71,6 +72,9 @@ export function SettingsView() {
                 }
                 if (loadedSettings.commandWakeWord) {
                     setWakeWordInput(loadedSettings.commandWakeWord);
+                }
+                if (loadedSettings.brainVaultPath) {
+                    setVaultPathInput(loadedSettings.brainVaultPath);
                 }
             } catch (error) {
                 console.error("Failed to load settings:", error);
@@ -110,6 +114,12 @@ export function SettingsView() {
         const w = wakeWordInput.trim().toLowerCase() || "jarvis";
         setWakeWordInput(w);
         await handleSettingChange("commandWakeWord", w);
+    };
+
+    const handleSaveVaultPath = async () => {
+        const p = vaultPathInput.trim() || "~/brain";
+        setVaultPathInput(p);
+        await handleSettingChange("brainVaultPath", p);
     };
 
     const handleClearHistory = async () => {
@@ -633,6 +643,67 @@ export function SettingsView() {
                         <p className="text-xs text-muted-foreground">
                             Requiring “{wakeWord}” first means ordinary speech like “select all the files” stays literal text — only “{wakeWord} select all” fires the command.
                         </p>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Brain className="h-5 w-5" />
+                            Second Brain
+                        </CardTitle>
+                        <CardDescription>
+                            Capture notes (Copilot+N) and meetings (Copilot+M) into a Markdown vault.
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                        <div className="space-y-2">
+                            <Label htmlFor="vaultPath">Vault folder</Label>
+                            <div className="flex gap-2">
+                                <Input
+                                    id="vaultPath"
+                                    value={vaultPathInput}
+                                    onChange={(e) => setVaultPathInput(e.target.value)}
+                                    placeholder="~/brain"
+                                    disabled={isLoading}
+                                />
+                                <Button variant="outline" onClick={handleSaveVaultPath} disabled={isLoading}>
+                                    Save
+                                </Button>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Plain Markdown, Obsidian-compatible. Notes append to <code>notes/</code>;
+                                meetings get their own file in <code>meetings/</code>. Point Obsidian here.
+                            </p>
+                        </div>
+                        <div className="flex items-center justify-between space-x-2">
+                            <div className="space-y-1">
+                                <Label htmlFor="brainGit">Auto-commit to git</Label>
+                                <p className="text-sm text-muted-foreground">
+                                    Commit each capture when the vault is a git repo (for versioned, synced backups).
+                                </p>
+                            </div>
+                            <Switch
+                                id="brainGit"
+                                checked={settings.brainGit ?? true}
+                                onCheckedChange={(c) => handleSettingChange("brainGit", c)}
+                                disabled={isLoading}
+                            />
+                        </div>
+                        <div className="flex items-center justify-between space-x-2">
+                            <div className="space-y-1">
+                                <Label htmlFor="brainGitPush">Auto-push after commit</Label>
+                                <p className="text-sm text-muted-foreground">
+                                    Push to the configured remote after each commit. Off by default.
+                                </p>
+                            </div>
+                            <Switch
+                                id="brainGitPush"
+                                checked={settings.brainGitPush ?? false}
+                                onCheckedChange={(c) => handleSettingChange("brainGitPush", c)}
+                                disabled={isLoading}
+                            />
+                        </div>
                     </CardContent>
                 </Card>
 
