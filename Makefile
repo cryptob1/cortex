@@ -163,7 +163,7 @@ _ensure-sidecar-stub:
 	fi
 	@echo '#!/bin/bash' > ~/.local/bin/oflow-toggle
 	@echo 'OFLOW_BIN="$$HOME/.local/bin/oflow"' >> ~/.local/bin/oflow-toggle
-	@echo 'WIN_CLASS="oflow-ui"' >> ~/.local/bin/oflow-toggle
+	@echo 'WIN_CLASS="oflow"' >> ~/.local/bin/oflow-toggle
 	@echo 'ADDR=$$(hyprctl clients -j | jq -r ".[] | select(.class == \"$$WIN_CLASS\") | .address" | head -1)' >> ~/.local/bin/oflow-toggle
 	@echo 'if [ -n "$$ADDR" ] && [ "$$ADDR" != "null" ]; then' >> ~/.local/bin/oflow-toggle
 	@echo '    WS=$$(hyprctl clients -j | jq -r ".[] | select(.address == \"$$ADDR\") | .workspace.name")' >> ~/.local/bin/oflow-toggle
@@ -182,6 +182,10 @@ _ensure-sidecar-stub:
 	@echo '    "$$OFLOW_BIN" &' >> ~/.local/bin/oflow-toggle
 	@echo 'fi' >> ~/.local/bin/oflow-toggle
 	@chmod +x ~/.local/bin/oflow-toggle
+	@echo "Creating app-menu launcher (oflow.desktop)..."
+	@mkdir -p ~/.local/share/applications
+	@printf '[Desktop Entry]\nType=Application\nName=oflow\nGenericName=Voice Typing & Second Brain\nComment=Voice dictation, notes (Copilot+N) and meetings (Copilot+M)\nExec=%s/.local/bin/oflow-toggle\nIcon=audio-input-microphone\nTerminal=false\nCategories=Utility;AudioVideo;Audio;\nKeywords=voice;dictation;transcription;notes;meetings;brain;\nStartupWMClass=oflow\n' "$$HOME" > ~/.local/share/applications/oflow.desktop
+	@update-desktop-database ~/.local/share/applications 2>/dev/null || true
 	@echo ""
 	@echo "Installation complete!"
 	@echo "  - Binary: ~/.local/bin/oflow"
