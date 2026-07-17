@@ -98,6 +98,81 @@ fn write_settings(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// One Markdown file in the second-brain vault (a note-day or a meeting).
+#[derive(serde::Serialize)]
+struct VaultEntry {
+    name: String,
+    content: String,
+    modified: u64, // unix seconds
+}
+
+fn expand_tilde(p: &str) -> std::path::PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    std::path::PathBuf::from(p)
+}
+
+/// Resolve the brain vault dir the same way brain.py does:
+/// env OFLOW_BRAIN_DIR > settings.json brainVaultPath > ~/brain.
+fn vault_dir() -> std::path::PathBuf {
+    if let Ok(env) = std::env::var("OFLOW_BRAIN_DIR") {
+        if !env.is_empty() {
+            return expand_tilde(&env);
+        }
+    }
+    let home = dirs::home_dir().unwrap_or_default();
+    if let Ok(contents) = std::fs::read_to_string(home.join(SETTINGS_PATH)) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(p) = v.get("brainVaultPath").and_then(|x| x.as_str()) {
+                if !p.is_empty() {
+                    return expand_tilde(p);
+                }
+            }
+        }
+    }
+    home.join("brain")
+}
+
+/// List Markdown entries in the vault's `notes/` or `meetings/` folder,
+/// newest first. Returns an empty list if the folder doesn't exist yet.
+#[tauri::command]
+fn read_vault(kind: String) -> Result<Vec<VaultEntry>, String> {
+    if kind != "notes" && kind != "meetings" {
+        return Err("invalid vault kind".to_string());
+    }
+    let dir = vault_dir().join(&kind);
+    let mut entries: Vec<VaultEntry> = Vec::new();
+    let read = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(entries), // vault/folder not created yet
+    };
+    for e in read.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("md") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let name = path
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .to_string();
+        let modified = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        entries.push(VaultEntry { name, content, modified });
+    }
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(entries)
+}
+
 /// Starts recording audio.
 ///
 /// # Returns
@@ -571,7 +646,8 @@ pub fn run() {
             show_window,
             hide_window,
             get_shortcut,
-            set_shortcut
+            set_shortcut,
+            read_vault
         ])
         .run(tauri::generate_context!())
         .map_err(|e| {

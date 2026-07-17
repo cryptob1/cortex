@@ -62,6 +62,7 @@ build-sidecar: setup-backend
 		--specpath /tmp \
 		--hidden-import sounddevice \
 		--hidden-import _sounddevice_data \
+		--hidden-import brain \
 		--collect-all sounddevice \
 		oflow.py
 	@echo "Sidecar built: oflow-ui/src-tauri/bin/$(SIDECAR_NAME)"

@@ -1,15 +1,18 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, History, Settings, Mic } from "lucide-react";
+import { LayoutDashboard, History, Settings, Mic, StickyNote, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ToastProvider } from "@/components/ui/toast";
 import { Dashboard } from "@/components/Dashboard";
 import { HistoryView } from "@/components/HistoryView";
+import { VaultView } from "@/components/VaultView";
 import { SettingsView } from "@/components/SettingsView";
 import { showWindow } from "@/lib/api";
 
+type Tab = "dashboard" | "history" | "notes" | "meetings" | "settings";
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "history" | "settings">("dashboard");
+  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
 
   // Show window on mount
   useEffect(() => {
@@ -44,6 +47,20 @@ export default function App() {
               History
             </NavButton>
             <NavButton
+              active={activeTab === "notes"}
+              onClick={() => setActiveTab("notes")}
+              icon={<StickyNote className="h-4 w-4" />}
+            >
+              Notes
+            </NavButton>
+            <NavButton
+              active={activeTab === "meetings"}
+              onClick={() => setActiveTab("meetings")}
+              icon={<Users className="h-4 w-4" />}
+            >
+              Meetings
+            </NavButton>
+            <NavButton
               active={activeTab === "settings"}
               onClick={() => setActiveTab("settings")}
               icon={<Settings className="h-4 w-4" />}
@@ -61,6 +78,8 @@ export default function App() {
         <main className="flex-1 overflow-auto bg-muted/10 p-8">
           {activeTab === "dashboard" && <Dashboard />}
           {activeTab === "history" && <HistoryView />}
+          {activeTab === "notes" && <VaultView kind="notes" title="Notes" subtitle="Quick notes you captured with Copilot+N." />}
+          {activeTab === "meetings" && <VaultView kind="meetings" title="Meetings" subtitle="Recorded meetings, summarized with Copilot+M." />}
           {activeTab === "settings" && <SettingsView />}
         </main>
       </div>

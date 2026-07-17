@@ -134,6 +134,28 @@ export async function getTranscriptStats(): Promise<TranscriptStats> {
 }
 
 /**
+ * One Markdown entry in the second-brain vault (a note-day or a meeting).
+ */
+export interface VaultEntry {
+    name: string;
+    content: string;
+    modified: number; // unix seconds
+}
+
+/**
+ * Reads the vault's notes/ or meetings/ folder (via the Rust backend, which
+ * resolves the configured vault path). Newest first; [] if none yet.
+ */
+export async function readVault(kind: 'notes' | 'meetings'): Promise<VaultEntry[]> {
+    try {
+        return await invoke<VaultEntry[]>('read_vault', { kind });
+    } catch (error) {
+        console.error(`Failed to read vault ${kind}:`, error);
+        return [];
+    }
+}
+
+/**
  * Loads settings from file.
  */
 export async function loadSettings(): Promise<Settings> {
