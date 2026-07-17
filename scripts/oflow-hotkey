@@ -36,6 +36,15 @@ fi
   [ -n "$UNBIND" ] && echo "unbind = $UNBIND"
   echo "bindd = $BIND, Oflow dictation (hold to talk), exec, ~/.local/bin/oflow-ctl start"
   echo "bindr = $BIND, exec, ~/.local/bin/oflow-ctl stop"
+  # Note & meeting capture ride on the Copilot key (which holds Super+Shift):
+  # Copilot+N toggles a hands-free note; Copilot+M toggles a system+mic meeting.
+  # Emitted inside this block so they survive the block regeneration above.
+  if [ "$CHOICE" = "copilot" ]; then
+    echo "unbind = SUPER SHIFT, N"
+    echo "bind = SUPER SHIFT, N, exec, ~/.local/bin/oflow-ctl note"
+    echo "unbind = SUPER SHIFT, M"
+    echo "bind = SUPER SHIFT, M, exec, ~/.local/bin/oflow-ctl meeting"
+  fi
 } >> "$CONF"
 
 hyprctl reload >/dev/null 2>&1 || true
