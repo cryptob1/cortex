@@ -61,7 +61,7 @@ fn read_settings() -> Settings {
     let settings_path = home.join(SETTINGS_PATH);
 
     if let Ok(contents) = std::fs::read_to_string(&settings_path) {
-        eprintln!("[oflow] Read settings file: {}", contents);
+        // NB: never log `contents` — settings.json holds API keys.
         match serde_json::from_str::<Settings>(&contents) {
             Ok(s) => {
                 eprintln!("[oflow] Parsed shortcut: {:?}", s.shortcut);

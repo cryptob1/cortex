@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Activity, Clock, FileText, Loader2, Mic } from "lucide-react";
-import { getTranscriptStats, getTranscripts, loadSettings, type Transcript } from "@/lib/api";
+import { Activity, Clock, FileText, Loader2, Mic, StickyNote, Users } from "lucide-react";
+import { getTranscriptStats, getTranscripts, loadSettings, readVault, type Transcript } from "@/lib/api";
 
 export function Dashboard() {
     const [stats, setStats] = useState({
@@ -13,20 +13,26 @@ export function Dashboard() {
     const [isLoading, setIsLoading] = useState(true);
     const [wakeWord, setWakeWord] = useState("jarvis");
     const [commandsOn, setCommandsOn] = useState(true);
+    const [noteCount, setNoteCount] = useState(0);
+    const [meetingCount, setMeetingCount] = useState(0);
 
     useEffect(() => {
         const loadData = async () => {
             setIsLoading(true);
             try {
-                const [statsData, transcripts, settings] = await Promise.all([
+                const [statsData, transcripts, settings, notes, meetings] = await Promise.all([
                     getTranscriptStats(),
                     getTranscripts(),
                     loadSettings(),
+                    readVault("notes"),
+                    readVault("meetings"),
                 ]);
                 setStats(statsData);
                 setRecentTranscripts(transcripts.slice(0, 5));
                 setWakeWord((settings.commandWakeWord || "jarvis").trim() || "jarvis");
                 setCommandsOn(settings.enableSpokenActions ?? true);
+                setNoteCount(notes.length);
+                setMeetingCount(meetings.length);
             } catch (error) {
                 console.error("Failed to load dashboard data:", error);
             } finally {
@@ -131,6 +137,38 @@ export function Dashboard() {
                             <>
                                 <div className="text-2xl font-bold">{formatTime(stats.estimatedTimeSaved)}</div>
                                 <p className="text-xs text-muted-foreground">vs typing manually</p>
+                            </>
+                        )}
+                    </CardContent>
+                </Card>
+                <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                        <CardTitle className="text-sm font-medium">Notes</CardTitle>
+                        <StickyNote className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                        {isLoading ? (
+                            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                        ) : (
+                            <>
+                                <div className="text-2xl font-bold">{noteCount}</div>
+                                <p className="text-xs text-muted-foreground">Captured with Copilot+N</p>
+                            </>
+                        )}
+                    </CardContent>
+                </Card>
+                <Card>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                        <CardTitle className="text-sm font-medium">Meetings</CardTitle>
+                        <Users className="h-4 w-4 text-muted-foreground" />
+                    </CardHeader>
+                    <CardContent>
+                        {isLoading ? (
+                            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                        ) : (
+                            <>
+                                <div className="text-2xl font-bold">{meetingCount}</div>
+                                <p className="text-xs text-muted-foreground">Recorded with Copilot+M</p>
                             </>
                         )}
                     </CardContent>

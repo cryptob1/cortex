@@ -1418,6 +1418,22 @@ async def summarize_meeting(
     return ""
 
 
+# Standalone filler words to drop from a stored transcript (with any trailing
+# comma). Word-bounded so real words ("summer", "her") are untouched. Used for
+# long meeting transcripts, where an LLM cleanup pass would be slow and risk
+# truncation; short dictations still get the smarter LLM cleanup.
+_FILLER_RE = re.compile(r"\b(?:um+|uh+|uhm+|umm+|er+|erm+|ah+|hmm+)\b,?", re.IGNORECASE)
+
+
+def strip_fillers(text: str) -> str:
+    """Remove standalone filler words and tidy the resulting whitespace/punctuation."""
+    text = _FILLER_RE.sub("", text)
+    text = re.sub(r"\s+([,.!?])", r"\1", text)   # no space before punctuation
+    text = re.sub(r"(,\s*){2,}", ", ", text)       # collapse repeated commas
+    text = re.sub(r"[ \t]{2,}", " ", text)         # collapse runs of spaces
+    return text.strip()
+
+
 def load_wav_mono(path: str) -> np.ndarray:
     """Load a 16-bit PCM mono WAV (as recorded for meetings) into a float32 array
     normalized to [-1, 1] at the source sample rate."""
@@ -2935,10 +2951,14 @@ class VoiceDictationServer:
             self.audio_feedback.play_error()
             return
 
+        # Strip filler words from the stored transcript (cheap, local, safe on
+        # arbitrarily long text — unlike the LLM cleanup used for short dictations).
+        transcript = strip_fillers(raw)
+
         cleanup_provider, cleanup_key = resolve_cleanup_provider(settings, provider, api_key)
         summary = ""
         if cleanup_key:
-            summary = await summarize_meeting(client, raw, cleanup_key, cleanup_provider)
+            summary = await summarize_meeting(client, transcript, cleanup_key, cleanup_provider)
 
         if not _HAS_BRAIN:
             logger.error("Meeting recorded but brain module unavailable")
@@ -2946,7 +2966,7 @@ class VoiceDictationServer:
             self.audio_feedback.play_error()
             return
         try:
-            path = brain.add_meeting(raw, summary)
+            path = brain.add_meeting(transcript, summary)
             _notify("📝 Meeting saved", f"{duration / 60:.0f} min → {path.name}")
             logger.info(f"Meeting saved → {path}")
         except Exception:
