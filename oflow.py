@@ -2913,6 +2913,7 @@ class VoiceDictationServer:
         self.audio_feedback.play_stop()
         self.waybar_state.transcribing()
         logger.info("Meeting recording stopped; transcribing")
+        _notify("⏹️ Meeting stopped", "Transcribing & summarizing…")
         self._run_on_loop(self._process_meeting(wav))
 
     async def _process_meeting(self, wav_path: str | None):
@@ -3164,6 +3165,7 @@ class VoiceDictationServer:
                             # Second Copilot+N: end the session and save the note.
                             logger.info("Note session ended by toggle; saving")
                             self._note_session = False
+                            _notify("⏹️ Note stopped", "Transcribing & saving…")
                             self._stop_recording()
                     elif cmd == "meeting":
                         # Copilot+M toggles a meeting. The Copilot key-down already
