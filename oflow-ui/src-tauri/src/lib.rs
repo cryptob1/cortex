@@ -173,6 +173,45 @@ fn read_vault(kind: String) -> Result<Vec<VaultEntry>, String> {
     Ok(entries)
 }
 
+/// Answer + cited sources from an "ask my brain" query.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AskResult {
+    answer: String,
+    #[serde(default)]
+    sources: Vec<String>,
+}
+
+/// Run a natural-language query over the vault via the brain_search CLI and
+/// return the synthesized answer + sources. Blocking subprocess is fine here —
+/// it's a user-triggered, occasional call.
+#[tauri::command]
+async fn ask_brain(query: String) -> Result<AskResult, String> {
+    if query.trim().is_empty() {
+        return Err("empty query".to_string());
+    }
+    let home = dirs::home_dir().ok_or("Could not find home directory")?;
+    let launcher = home.join(".local/bin/oflow-brain");
+    let out = std::process::Command::new(&launcher)
+        .arg("--json")
+        .arg(&query)
+        .output()
+        .map_err(|e| format!("Failed to run brain search: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "brain search failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The JSON is the last stdout line starting with '{' (logs go to stderr).
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .ok_or("no answer returned")?;
+    serde_json::from_str::<AskResult>(line).map_err(|e| format!("parse error: {}", e))
+}
+
 /// Starts recording audio.
 ///
 /// # Returns
@@ -647,7 +686,8 @@ pub fn run() {
             hide_window,
             get_shortcut,
             set_shortcut,
-            read_vault
+            read_vault,
+            ask_brain
         ])
         .run(tauri::generate_context!())
         .map_err(|e| {

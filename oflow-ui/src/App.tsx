@@ -1,15 +1,16 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, History, Settings, Mic, StickyNote, Users } from "lucide-react";
+import { LayoutDashboard, History, Settings, Mic, StickyNote, Users, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ToastProvider } from "@/components/ui/toast";
 import { Dashboard } from "@/components/Dashboard";
 import { HistoryView } from "@/components/HistoryView";
 import { VaultView } from "@/components/VaultView";
+import { AskView } from "@/components/AskView";
 import { SettingsView } from "@/components/SettingsView";
 import { showWindow } from "@/lib/api";
 
-type Tab = "dashboard" | "history" | "notes" | "meetings" | "settings";
+type Tab = "dashboard" | "ask" | "history" | "notes" | "meetings" | "settings";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
@@ -38,6 +39,13 @@ export default function App() {
               icon={<LayoutDashboard className="h-4 w-4" />}
             >
               Dashboard
+            </NavButton>
+            <NavButton
+              active={activeTab === "ask"}
+              onClick={() => setActiveTab("ask")}
+              icon={<Sparkles className="h-4 w-4" />}
+            >
+              Ask
             </NavButton>
             <NavButton
               active={activeTab === "history"}
@@ -77,6 +85,7 @@ export default function App() {
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-muted/10 p-8">
           {activeTab === "dashboard" && <Dashboard />}
+          {activeTab === "ask" && <AskView />}
           {activeTab === "history" && <HistoryView />}
           {activeTab === "notes" && <VaultView kind="notes" title="Notes" subtitle="Quick notes you captured with Copilot+N." />}
           {activeTab === "meetings" && <VaultView kind="meetings" title="Meetings" subtitle="Recorded meetings, summarized with Copilot+M." />}

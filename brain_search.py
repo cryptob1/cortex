@@ -190,20 +190,31 @@ def answer(query: str, k: int = 6) -> tuple[str, list[str]]:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = sys.argv[1:]
+
+    # --json emits {"answer","sources"} on stdout (for the UI). Keep logs off
+    # stdout so the JSON line is the only thing there.
+    as_json = bool(args) and args[0] == "--json"
+    if as_json:
+        args = args[1:]
+    logging.basicConfig(level=logging.WARNING if as_json else logging.INFO, format="%(message)s")
+
     if not args or args[0] in ("-h", "--help"):
-        print('Usage: brain_search.py "your question"   |   --reindex')
+        print('Usage: brain_search.py [--json] "your question"   |   --reindex')
         return
     if args[0] == "--reindex":
         n = build_index()
-        print(f"Indexed {n} chunks.")
+        print(json.dumps({"indexed": n}) if as_json else f"Indexed {n} chunks.")
         return
+
     query = " ".join(args)
     text, sources = answer(query)
-    print(text)
-    if sources:
-        print("\nSources: " + ", ".join(sources))
+    if as_json:
+        print(json.dumps({"answer": text, "sources": sources}))
+    else:
+        print(text)
+        if sources:
+            print("\nSources: " + ", ".join(sources))
 
 
 if __name__ == "__main__":

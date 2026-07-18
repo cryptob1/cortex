@@ -156,6 +156,22 @@ export async function readVault(kind: 'notes' | 'meetings'): Promise<VaultEntry[
 }
 
 /**
+ * Answer + cited sources from an "ask my brain" query.
+ */
+export interface AskResult {
+    answer: string;
+    sources: string[];
+}
+
+/**
+ * Ask a natural-language question over the vault (runs the brain_search RAG
+ * via the Rust backend and returns a synthesized, cited answer).
+ */
+export async function askBrain(query: string): Promise<AskResult> {
+    return await invoke<AskResult>('ask_brain', { query });
+}
+
+/**
  * Loads settings from file.
  */
 export async function loadSettings(): Promise<Settings> {
