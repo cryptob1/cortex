@@ -10,8 +10,14 @@ import { readVault, type VaultEntry } from "@/lib/api";
  * Lists Markdown entries from the second-brain vault (notes/ or meetings/).
  * Reused for both the Notes and Meetings tabs.
  */
+const CAPTURE_HINT: Record<string, string> = {
+    notes: "Copilot+N",
+    meetings: "Copilot+M",
+    initiatives: 'a note saying "start an initiative…"',
+};
+
 export function VaultView({ kind, title, subtitle }: {
-    kind: "notes" | "meetings";
+    kind: "notes" | "meetings" | "initiatives";
     title: string;
     subtitle: string;
 }) {
@@ -90,7 +96,7 @@ export function VaultView({ kind, title, subtitle }: {
                                 <p className="text-sm">
                                     {searchQuery
                                         ? `No ${kind} match your search.`
-                                        : `No ${kind} yet — capture one with ${kind === "notes" ? "Copilot+N" : "Copilot+M"}.`}
+                                        : `No ${kind} yet — capture one with ${CAPTURE_HINT[kind] ?? "voice"}.`}
                                 </p>
                             </div>
                         ) : (

@@ -80,13 +80,13 @@ def build_index() -> int:
     """(Re)build the vault index. Returns the number of chunks indexed."""
     vault = brain._vault()
     docs: list[dict] = []
-    for kind in ("notes", "meetings"):
+    for kind in ("notes", "meetings", "initiatives"):
         d = vault / kind
         if not d.exists():
             continue
         for f in sorted(d.glob("*.md")):
             for ch in _chunk(f.read_text()):
-                docs.append({"source": f"{kind}/{f.name}", "text": ch})
+                docs.append({"source": f"{kind}/{f.name}", "type": kind[:-1], "text": ch})
     if not docs:
         return 0
     vectors = _embed([d["text"] for d in docs])

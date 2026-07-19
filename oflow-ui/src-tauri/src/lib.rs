@@ -140,7 +140,7 @@ fn vault_dir() -> std::path::PathBuf {
 /// newest first. Returns an empty list if the folder doesn't exist yet.
 #[tauri::command]
 fn read_vault(kind: String) -> Result<Vec<VaultEntry>, String> {
-    if kind != "notes" && kind != "meetings" {
+    if !matches!(kind.as_str(), "notes" | "meetings" | "initiatives") {
         return Err("invalid vault kind".to_string());
     }
     let dir = vault_dir().join(&kind);

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -88,50 +89,130 @@ def _commit(vault: Path, path: Path, message: str) -> None:
             _git(vault, "push")
 
 
-def add_note(text: str, timestamp: datetime | None = None) -> Path:
-    """Write a note to its own Markdown file and commit it.
+# --------------------------------------------------------------------------- #
+# Universal item model
+#
+# Every item in the brain — note, meeting, initiative, and future types like
+# reminder/task — is a Markdown file with YAML frontmatter, discriminated by a
+# `type` field and stored in a folder per type. Shared frontmatter: id, type,
+# created, source, title, tags, links. Type-specific fields go in `extra`.
+# Adding a new type = a thin wrapper around write_item(), nothing else.
+# --------------------------------------------------------------------------- #
+def new_id(ts: datetime | None = None) -> str:
+    """Stable, sortable id (millisecond precision). Links target this, not the
+    filename, so items can be renamed/reorganized without breaking relations."""
+    ts = ts or datetime.now()
+    return ts.strftime("%Y%m%dT%H%M%S%f")[:-3]
 
-    One file per note (not per day) so captures from different machines never
-    collide when the vault is synced (Syncthing/Obsidian) across laptops. Returns
-    the file written; raises only on filesystem errors (git problems are swallowed).
+
+def _yaml_frontmatter(fields: dict) -> str:
+    lines = ["---"]
+    for k, v in fields.items():
+        if v is None or v == "" or v == []:
+            continue
+        if isinstance(v, list):
+            lines.append(f"{k}:")
+            lines.extend(f"  - {item}" for item in v)
+        elif isinstance(v, bool):
+            lines.append(f"{k}: {'true' if v else 'false'}")
+        else:
+            lines.append(f"{k}: {v}")
+    lines.append("---\n")
+    return "\n".join(lines)
+
+
+def write_item(
+    item_type: str,
+    folder: str,
+    basename: str,
+    *,
+    title: str = "",
+    body: str = "",
+    tags: list[str] | None = None,
+    links: list[str] | None = None,
+    extra: dict | None = None,
+    source: str = "oflow",
+    timestamp: datetime | None = None,
+    item_id: str | None = None,
+) -> Path:
+    """Write one brain item as frontmatter Markdown and commit it. Returns the path.
+
+    `basename` gets a `-N` suffix if it already exists, so captures never collide
+    (important when the vault is synced across machines).
     """
     ts = timestamp or datetime.now()
     vault = _vault()
-    notes_dir = vault / "notes"
-    notes_dir.mkdir(parents=True, exist_ok=True)
-
-    # Unique filename to the second, with a suffix guard for same-second captures.
-    base = f"{ts:%Y-%m-%d-%H%M%S}"
-    note_file = notes_dir / f"{base}.md"
+    d = vault / folder
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{basename}.md"
     n = 2
-    while note_file.exists():
-        note_file = notes_dir / f"{base}-{n}.md"
+    while path.exists():
+        path = d / f"{basename}-{n}.md"
         n += 1
 
-    note_file.write_text(
-        f"---\ncreated: {ts.isoformat()}\ntype: note\nsource: oflow\n---\n\n{text.strip()}\n"
+    fields = {
+        "id": item_id or new_id(ts),
+        "type": item_type,
+        "created": ts.isoformat(),
+        "source": source,
+    }
+    if title:
+        fields["title"] = title
+    if tags:
+        fields["tags"] = tags
+    if links:
+        fields["links"] = links
+    if extra:
+        fields.update(extra)
+
+    path.write_text(_yaml_frontmatter(fields) + "\n" + body)
+    _commit(vault, path, f"{item_type}: {title or basename}")
+    logger.info(f"{item_type.capitalize()} saved to {path}")
+    return path
+
+
+def add_note(text: str, timestamp: datetime | None = None) -> Path:
+    """Save a dictated note. One file per note (never per-day) so cross-machine
+    syncs don't collide."""
+    ts = timestamp or datetime.now()
+    return write_item(
+        "note", "notes", f"{ts:%Y-%m-%d-%H%M%S}",
+        body=text.strip() + "\n", source="oflow-note", timestamp=ts,
     )
-    _commit(vault, note_file, f"note: {ts:%Y-%m-%d %H:%M}")
-    logger.info(f"Note saved to {note_file}")
-    return note_file
+
+
+def _slugify(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return s or "initiative"
+
+
+def add_initiative(name: str, goals: list[str], note: str = "",
+                   timestamp: datetime | None = None) -> Path:
+    """Create an initiative (a goal/theme that captures link to), with goals in
+    frontmatter and a running Log section."""
+    ts = timestamp or datetime.now()
+    body = f"# {name}\n\n"
+    if goals:
+        body += "## Goals\n" + "".join(f"- {g}\n" for g in goals) + "\n"
+    body += "## Log\n"
+    if note.strip():
+        body += f"\n### {ts:%Y-%m-%d %H:%M} — created\n{note.strip()}\n"
+    return write_item(
+        "initiative", "initiatives", _slugify(name),
+        title=name, body=body, source="oflow-note", timestamp=ts,
+        extra={"status": "active", "goals": goals},
+    )
 
 
 def add_meeting(transcript: str, summary: str, timestamp: datetime | None = None) -> Path:
-    """Write a meeting (summary + full transcript) to its own Markdown file and
-    commit it. One file per meeting under ``meetings/``. Returns the file path."""
+    """Write a meeting (summary + full transcript) to its own Markdown file."""
     ts = timestamp or datetime.now()
-    vault = _vault()
-    meetings_dir = vault / "meetings"
-    meetings_dir.mkdir(parents=True, exist_ok=True)
-    mfile = meetings_dir / f"{ts:%Y-%m-%d-%H%M}.md"
-
-    with open(mfile, "w") as f:
-        f.write(f"---\ncreated: {ts.isoformat()}\ntype: meeting\nsource: oflow\n---\n\n")
-        f.write(f"# Meeting — {ts:%Y-%m-%d %H:%M}\n\n")
-        if summary.strip():
-            f.write(f"{summary.strip()}\n\n")
-        f.write(f"## Transcript\n\n{transcript.strip()}\n")
-
-    _commit(vault, mfile, f"meeting: {ts:%Y-%m-%d %H:%M}")
-    logger.info(f"Meeting saved to {mfile}")
-    return mfile
+    title = f"Meeting — {ts:%Y-%m-%d %H:%M}"
+    body = f"# {title}\n\n"
+    if summary.strip():
+        body += f"{summary.strip()}\n\n"
+    body += f"## Transcript\n\n{transcript.strip()}\n"
+    return write_item(
+        "meeting", "meetings", f"{ts:%Y-%m-%d-%H%M}",
+        title=title, body=body, source="oflow-meeting", timestamp=ts,
+    )

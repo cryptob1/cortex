@@ -1434,6 +1434,75 @@ def strip_fillers(text: str) -> str:
     return text.strip()
 
 
+INITIATIVE_TRIGGER_RE = re.compile(
+    r"\b(?:start|create|begin|kick\s*off|new)\s+(?:an?\s+|my\s+)?initiative\b",
+    re.IGNORECASE,
+)
+
+
+def is_initiative_intent(text: str) -> bool:
+    """True if a note is asking to start an initiative (checked near the start)."""
+    return bool(INITIATIVE_TRIGGER_RE.search(text[:160]))
+
+
+# Voice-intent router: maps a note's leading text to a brain item type. To add a
+# new spoken capture type (e.g. reminders), append ("reminder", REMINDER_RE) here
+# and handle it where notes are routed — everything else falls through to "note".
+CAPTURE_INTENTS: list[tuple[str, "re.Pattern"]] = [
+    ("initiative", INITIATIVE_TRIGGER_RE),
+]
+
+
+def classify_capture(text: str) -> str:
+    head = text[:160]
+    for kind, rx in CAPTURE_INTENTS:
+        if rx.search(head):
+            return kind
+    return "note"
+
+
+INITIATIVE_EXTRACT_PROMPT = (
+    "The user spoke a note to start a personal initiative (a goal or project their "
+    "second brain should track). From the note, extract a concise name (a noun phrase, "
+    "max 6 words, without a leading 'initiative to') and the specific goals they mention. "
+    'Respond with ONLY JSON: {"name": "...", "goals": ["...", ...]}. '
+    "Use an empty goals list if none are stated."
+)
+
+
+async def extract_initiative(
+    client: httpx.AsyncClient, text: str, api_key: str, provider: str
+) -> tuple[str, list[str]]:
+    """LLM-extract an initiative name + goals from a spoken note. Returns ("", [])
+    on failure so the caller can fall back to a naive name."""
+    url = GROQ_CHAT_URL if provider == "groq" else OPENAI_CHAT_URL
+    model = "llama-3.3-70b-versatile" if provider == "groq" else "gpt-4o-mini"
+    try:
+        resp = await _post_with_retry(
+            client, url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": INITIATIVE_EXTRACT_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 300,
+                "response_format": {"type": "json_object"},
+            },
+        )
+        if resp.status_code == 200:
+            data = json.loads(resp.json()["choices"][0]["message"]["content"])
+            name = str(data.get("name", "")).strip()
+            goals = [str(g).strip() for g in data.get("goals", []) if str(g).strip()]
+            return name, goals
+        logger.error(f"Initiative extract failed: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.error(f"Initiative extract error: {e}")
+    return "", []
+
+
 def load_wav_mono(path: str) -> np.ndarray:
     """Load a 16-bit PCM mono WAV (as recorded for meetings) into a float32 array
     normalized to [-1, 1] at the source sample rate."""
@@ -2977,6 +3046,24 @@ class VoiceDictationServer:
             return
         self.waybar_state.idle()
 
+    async def _save_initiative(self, client, text: str, provider: str, key: str | None):
+        """Create an initiative from a spoken note ("start an initiative…")."""
+        name, goals = "", []
+        if key:
+            name, goals = await extract_initiative(client, text, key, provider)
+        if not name:
+            # Fallback: use the note text (minus the trigger phrase) as the name.
+            stripped = INITIATIVE_TRIGGER_RE.sub("", text, count=1).lstrip(" ,.:—-")
+            name = (stripped.split(".")[0].strip() or "New initiative")[:60]
+        try:
+            path = brain.add_initiative(name, goals, note=text)
+            detail = name + (f" · {len(goals)} goal{'s' if len(goals) != 1 else ''}" if goals else "")
+            _notify("🎯 Initiative created", detail)
+            logger.info(f"Initiative created → {path}")
+        except Exception:
+            logger.exception("Failed to save initiative; saving as a note instead")
+            self._save_note(text)
+
     async def _process_transcription(self):
         """Process recorded audio: transcribe, clean up, and type result."""
         settings = load_settings()
@@ -3091,7 +3178,13 @@ class VoiceDictationServer:
         # Route by capture mode. A note goes to the second-brain vault instead of
         # being pasted; dictation (default) is output into the focused app.
         if self._capture_mode == "note":
-            self._save_note(cleaned_text)
+            # Route the note by spoken intent: "start an initiative…" → initiative,
+            # (future types plug into CAPTURE_INTENTS) — otherwise a plain note.
+            kind = classify_capture(cleaned_text) if _HAS_BRAIN else "note"
+            if kind == "initiative":
+                await self._save_initiative(client, cleaned_text, cleanup_provider, cleanup_key)
+            else:
+                self._save_note(cleaned_text)
         elif enable_actions:
             # Output: run "<wake word> command" voice commands as real keystrokes
             # (default), or paste-and-optionally-submit on the legacy path.
