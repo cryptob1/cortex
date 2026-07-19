@@ -305,6 +305,117 @@ def link_all() -> int:
     return n
 
 
+# --------------------------------------------------------------------------- #
+# Initiative synthesis (the "coach")
+# --------------------------------------------------------------------------- #
+def _fm_list(fm: str, key: str) -> list[str]:
+    m = re.search(rf"^{key}:\s*\n((?:\s*-\s*.+\n?)+)", fm, re.MULTILINE)
+    return re.findall(r"^\s*-\s*(.+)$", m.group(1), re.MULTILINE) if m else []
+
+
+def _linked_items(init_id: str) -> list[dict]:
+    """Notes & meetings whose `links` frontmatter includes this initiative id."""
+    vault, out = brain._vault(), []
+    if not init_id:
+        return out
+    for kind in ("notes", "meetings"):
+        d = vault / kind
+        if not d.exists():
+            continue
+        for f in sorted(d.glob("*.md")):
+            fm, body = _split(f.read_text())
+            if init_id in _fm_list(fm, "links"):
+                if _fm_field(fm, "type") == "meeting":
+                    body = body.split("## Transcript", 1)[0]
+                out.append({"source": f"{kind}/{f.name}",
+                            "created": _fm_field(fm, "created")[:10],
+                            "text": body.strip()[:1500]})
+    return out
+
+
+def find_initiative(name_or_slug: str) -> Path | None:
+    d = brain._vault() / "initiatives"
+    if not d.exists():
+        return None
+    p = d / f"{brain._slugify(name_or_slug)}.md"
+    if p.exists():
+        return p
+    q = name_or_slug.lower()
+    for f in sorted(d.glob("*.md")):
+        fm, _ = _split(f.read_text())
+        if q in _fm_field(fm, "title").lower() or q in f.stem:
+            return f
+    return None
+
+
+def list_initiatives() -> list[dict]:
+    d = brain._vault() / "initiatives"
+    if not d.exists():
+        return []
+    out = []
+    for f in sorted(d.glob("*.md")):
+        fm, _ = _split(f.read_text())
+        out.append({
+            "slug": f.stem,
+            "title": _fm_field(fm, "title") or f.stem,
+            "status": _fm_field(fm, "status") or "active",
+            "goals": _fm_list(fm, "goals"),
+            "linked": len(_linked_items(_fm_field(fm, "id"))),
+        })
+    return out
+
+
+INITIATIVE_STATUS_PROMPT = (
+    "You are the user's productivity coach reviewing one initiative (a goal or project). "
+    "You're given its name and goals plus excerpts from their notes and meetings that relate "
+    "to it. Write a concise Markdown status with these sections: a one-line **Momentum** read, "
+    "**Recent activity** (bullets, cite the [source]), **Open action items** ('- [ ] …'), and "
+    "1-3 **Suggested next steps**. Base everything strictly on the excerpts — don't invent. If "
+    "there's little activity, say so and suggest a first concrete step."
+)
+
+
+def initiative_status(name_or_slug: str) -> dict:
+    """Synthesize a coach-style status for one initiative from its linked captures."""
+    f = find_initiative(name_or_slug)
+    if not f:
+        return {"title": name_or_slug, "status": f"No initiative matching '{name_or_slug}'.", "linked": 0}
+    fm, body = _split(f.read_text())
+    title = _fm_field(fm, "title") or f.stem
+    items = _linked_items(_fm_field(fm, "id"))
+    goals_block = body.split("## Log", 1)[0].strip()
+
+    key = _groq_key()
+    if not key:
+        return {"title": title, "linked": len(items),
+                "status": f"{len(items)} linked capture(s). Set a Groq key for a synthesized status."}
+    context = "\n\n".join(f"[{it['source']}] ({it['created']})\n{it['text']}" for it in items) \
+        or "(no notes or meetings link to this initiative yet)"
+
+    import httpx
+    try:
+        resp = httpx.post(
+            GROQ_CHAT_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": ANSWER_MODEL,
+                "messages": [
+                    {"role": "system", "content": INITIATIVE_STATUS_PROMPT},
+                    {"role": "user", "content": f"Initiative: {title}\n\n{goals_block}\n\nLinked captures:\n{context}"},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 700,
+            },
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return {"title": title, "linked": len(items),
+                    "status": resp.json()["choices"][0]["message"]["content"].strip()}
+        return {"title": title, "linked": len(items), "status": f"Groq error {resp.status_code}"}
+    except Exception as e:
+        return {"title": title, "linked": len(items), "status": f"Status error: {e}"}
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -329,6 +440,15 @@ def main() -> None:
     if args[0] == "--link-all":
         n = link_all()
         print(json.dumps({"linked": n}) if as_json else f"Linked {n} items to initiatives.")
+        return
+    if args[0] == "--initiatives":
+        data = list_initiatives()
+        print(json.dumps(data) if as_json
+              else ("\n".join(f"- {i['title']} ({i['linked']} linked)" for i in data) or "No initiatives yet."))
+        return
+    if args[0] == "--initiative":
+        data = initiative_status(" ".join(args[1:]))
+        print(json.dumps(data) if as_json else f"# {data['title']}\n\n{data['status']}")
         return
 
     query = " ".join(args)

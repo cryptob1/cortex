@@ -7,6 +7,7 @@ import { Dashboard } from "@/components/Dashboard";
 import { HistoryView } from "@/components/HistoryView";
 import { VaultView } from "@/components/VaultView";
 import { AskView } from "@/components/AskView";
+import { InitiativesView } from "@/components/InitiativesView";
 import { SettingsView } from "@/components/SettingsView";
 import { showWindow } from "@/lib/api";
 
@@ -93,7 +94,7 @@ export default function App() {
         <main className="flex-1 overflow-auto bg-muted/10 p-8">
           {activeTab === "dashboard" && <Dashboard />}
           {activeTab === "ask" && <AskView />}
-          {activeTab === "initiatives" && <VaultView kind="initiatives" title="Initiatives" subtitle="Goals & projects your brain tracks — say &quot;start an initiative…&quot; in a note." />}
+          {activeTab === "initiatives" && <InitiativesView />}
           {activeTab === "history" && <HistoryView />}
           {activeTab === "notes" && <VaultView kind="notes" title="Notes" subtitle="Quick notes you captured with Copilot+N." />}
           {activeTab === "meetings" && <VaultView kind="meetings" title="Meetings" subtitle="Recorded meetings, summarized with Copilot+M." />}

@@ -171,6 +171,30 @@ export async function askBrain(query: string): Promise<AskResult> {
     return await invoke<AskResult>('ask_brain', { query });
 }
 
+/** An initiative (goal/project) with its goals and how many captures link to it. */
+export interface Initiative {
+    slug: string;
+    title: string;
+    status: string;
+    goals: string[];
+    linked: number;
+}
+
+export async function listInitiatives(): Promise<Initiative[]> {
+    return await invoke<Initiative[]>('list_initiatives');
+}
+
+/** A synthesized coach-style status for one initiative. */
+export interface InitiativeStatus {
+    title: string;
+    status: string;
+    linked: number;
+}
+
+export async function initiativeStatus(name: string): Promise<InitiativeStatus> {
+    return await invoke<InitiativeStatus>('initiative_status', { name });
+}
+
 /**
  * Loads settings from file.
  */

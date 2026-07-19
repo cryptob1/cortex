@@ -212,6 +212,65 @@ async fn ask_brain(query: String) -> Result<AskResult, String> {
     serde_json::from_str::<AskResult>(line).map_err(|e| format!("parse error: {}", e))
 }
 
+/// Run the brain CLI with --json and return the last JSON line (object or array).
+fn run_brain_json(args: &[&str]) -> Result<String, String> {
+    let home = dirs::home_dir().ok_or("Could not find home directory")?;
+    let mut cmd = std::process::Command::new(home.join(".local/bin/oflow-brain"));
+    cmd.arg("--json");
+    for a in args {
+        cmd.arg(a);
+    }
+    let out = cmd.output().map_err(|e| format!("Failed to run brain: {}", e))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .rev()
+        .find(|l| {
+            let t = l.trim_start();
+            t.starts_with('{') || t.starts_with('[')
+        })
+        .map(|s| s.to_string())
+        .ok_or_else(|| "no json output".to_string())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Initiative {
+    slug: String,
+    title: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    goals: Vec<String>,
+    #[serde(default)]
+    linked: u32,
+}
+
+#[tauri::command]
+async fn list_initiatives() -> Result<Vec<Initiative>, String> {
+    let json = run_brain_json(&["--initiatives"])?;
+    serde_json::from_str(&json).map_err(|e| format!("parse error: {}", e))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct InitiativeStatus {
+    title: String,
+    status: String,
+    #[serde(default)]
+    linked: u32,
+}
+
+#[tauri::command]
+async fn initiative_status(name: String) -> Result<InitiativeStatus, String> {
+    if name.trim().is_empty() {
+        return Err("empty initiative".to_string());
+    }
+    let json = run_brain_json(&["--initiative", &name])?;
+    serde_json::from_str(&json).map_err(|e| format!("parse error: {}", e))
+}
+
 /// Starts recording audio.
 ///
 /// # Returns
@@ -687,7 +746,9 @@ pub fn run() {
             get_shortcut,
             set_shortcut,
             read_vault,
-            ask_brain
+            ask_brain,
+            list_initiatives,
+            initiative_status
         ])
         .run(tauri::generate_context!())
         .map_err(|e| {
