@@ -14,10 +14,11 @@ const CAPTURE_HINT: Record<string, string> = {
     notes: "Copilot+N",
     meetings: "Copilot+M",
     initiatives: 'a note saying "start an initiative…"',
+    reminders: 'a note saying "remind me to…"',
 };
 
 export function VaultView({ kind, title, subtitle }: {
-    kind: "notes" | "meetings" | "initiatives";
+    kind: "notes" | "meetings" | "initiatives" | "reminders";
     title: string;
     subtitle: string;
 }) {

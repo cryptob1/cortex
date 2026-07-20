@@ -170,6 +170,8 @@ API_TIMEOUT_SECONDS = 30.0  # Timeout for API requests
 # dozens of chunks; providers cap concurrency (ElevenLabs Scribe = 20), so keep
 # under that to avoid 429s. Override via OFLOW_MAX_TRANSCRIBE_CONCURRENCY.
 MAX_TRANSCRIBE_CONCURRENCY = int(os.getenv("OFLOW_MAX_TRANSCRIBE_CONCURRENCY", "12"))
+# How often the backend checks the vault for due reminders to fire.
+REMINDER_POLL_SECONDS = int(os.getenv("OFLOW_REMINDER_POLL_SECONDS", "30"))
 # How long an idle keep-alive socket may be reused before it's recycled. Kept
 # below typical server/NAT idle timeouts so we don't try to send on a socket the
 # other end has already dropped (e.g. after laptop suspend/resume).
@@ -1445,11 +1447,16 @@ def is_initiative_intent(text: str) -> bool:
     return bool(INITIATIVE_TRIGGER_RE.search(text[:160]))
 
 
+REMINDER_TRIGGER_RE = re.compile(
+    r"\b(?:remind me|set a reminder|reminder to)\b", re.IGNORECASE
+)
+
 # Voice-intent router: maps a note's leading text to a brain item type. To add a
-# new spoken capture type (e.g. reminders), append ("reminder", REMINDER_RE) here
-# and handle it where notes are routed — everything else falls through to "note".
+# new spoken capture type, append (type, regex) here and handle it where notes
+# are routed — everything else falls through to "note".
 CAPTURE_INTENTS: list[tuple[str, "re.Pattern"]] = [
     ("initiative", INITIATIVE_TRIGGER_RE),
+    ("reminder", REMINDER_TRIGGER_RE),
 ]
 
 
@@ -1501,6 +1508,42 @@ async def extract_initiative(
     except Exception as e:
         logger.error(f"Initiative extract error: {e}")
     return "", []
+
+
+async def extract_reminder(
+    client: httpx.AsyncClient, text: str, api_key: str, provider: str, now_iso: str
+) -> tuple[str, str]:
+    """LLM-extract (task, due) from a spoken reminder. `due` is ISO 8601 or ""
+    (no time given). Relative times are resolved against now_iso. ("", "") on error."""
+    url = GROQ_CHAT_URL if provider == "groq" else OPENAI_CHAT_URL
+    model = "llama-3.3-70b-versatile" if provider == "groq" else "gpt-4o-mini"
+    system = (
+        f"The user spoke a reminder. The current local datetime is {now_iso}. Extract the "
+        "task and its due datetime. Resolve relative times (\"tomorrow at 3\", \"in 2 hours\", "
+        "\"Friday morning\") to an absolute local datetime based on the current datetime. "
+        'Respond with ONLY JSON: {"task": "...", "due": "YYYY-MM-DDTHH:MM:SS"}. Leave "due" '
+        "an empty string if no time is stated."
+    )
+    try:
+        resp = await _post_with_retry(
+            client, url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": text}],
+                "temperature": 0.0,
+                "max_tokens": 200,
+                "response_format": {"type": "json_object"},
+            },
+        )
+        if resp.status_code == 200:
+            data = json.loads(resp.json()["choices"][0]["message"]["content"])
+            return str(data.get("task", "")).strip(), str(data.get("due", "")).strip()
+        logger.error(f"Reminder extract failed: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.error(f"Reminder extract error: {e}")
+    return "", ""
 
 
 def load_wav_mono(path: str) -> np.ndarray:
@@ -2120,6 +2163,23 @@ class VoiceDictationServer:
         # applying it now and whenever the setting changes in the UI.
         self._applied_hotkey: str | None = None
         self._start_hotkey_watcher()
+
+        # Fire desktop notifications for due reminders (Copilot+N "remind me to…").
+        if _HAS_BRAIN:
+            threading.Thread(target=self._reminder_watch_loop, daemon=True,
+                             name="oflow-reminders").start()
+
+    def _reminder_watch_loop(self):
+        """Poll the vault for due reminders and fire a notification for each."""
+        while getattr(self, "_running", True):
+            try:
+                for path, task, _due in brain.due_reminders():
+                    _notify("⏰ Reminder", task)
+                    brain.mark_reminder(path, "done")
+                    logger.info(f"Reminder fired: {task}")
+            except Exception:
+                logger.debug("Reminder check failed", exc_info=True)
+            time.sleep(REMINDER_POLL_SECONDS)
 
     def _start_hotkey_watcher(self):
         """Apply the configured hotkey now, then watch settings.json for changes."""
@@ -3078,6 +3138,28 @@ class VoiceDictationServer:
             logger.exception("Failed to save initiative; saving as a note instead")
             self._save_note(text)
 
+    async def _save_reminder(self, client, text: str, provider: str, key: str | None):
+        """Create a reminder from a spoken note ("remind me to…")."""
+        task, due = "", ""
+        if key:
+            task, due = await extract_reminder(
+                client, text, key, provider, datetime.now().isoformat(timespec="seconds"))
+        if not task:
+            task = REMINDER_TRIGGER_RE.sub("", text, count=1).lstrip(" ,.:to").strip()[:80] or "Reminder"
+        try:
+            brain.add_reminder(task, due=due, note=text)
+            when = ""
+            if due:
+                try:
+                    when = " · " + datetime.fromisoformat(due).strftime("%a %b %-d, %-I:%M %p")
+                except ValueError:
+                    pass
+            _notify("⏰ Reminder set", task + when)
+            logger.info(f"Reminder set: {task} (due {due or 'unset'})")
+        except Exception:
+            logger.exception("Failed to save reminder; saving as a note instead")
+            self._save_note(text)
+
     async def _process_transcription(self):
         """Process recorded audio: transcribe, clean up, and type result."""
         settings = load_settings()
@@ -3197,6 +3279,8 @@ class VoiceDictationServer:
             kind = classify_capture(cleaned_text) if _HAS_BRAIN else "note"
             if kind == "initiative":
                 await self._save_initiative(client, cleaned_text, cleanup_provider, cleanup_key)
+            elif kind == "reminder":
+                await self._save_reminder(client, cleaned_text, cleanup_provider, cleanup_key)
             else:
                 self._save_note(cleaned_text)
         elif enable_actions:

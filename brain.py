@@ -204,6 +204,69 @@ def add_initiative(name: str, goals: list[str], note: str = "",
     )
 
 
+def add_reminder(task: str, due: str = "", note: str = "",
+                 timestamp: datetime | None = None) -> Path:
+    """Create a reminder (task + optional ISO `due` datetime). `status` starts
+    'pending'; the backend fires a notification when a due one comes up."""
+    ts = timestamp or datetime.now()
+    body = f"# {task}\n"
+    if due:
+        body += f"\n**Due:** {due}\n"
+    if note.strip():
+        body += f"\n{note.strip()}\n"
+    return write_item(
+        "reminder", "reminders", f"{ts:%Y-%m-%d-%H%M%S}",
+        title=task, body=body, source="oflow-note", timestamp=ts,
+        extra={"due": due, "status": "pending"},
+    )
+
+
+def _read_frontmatter(path: Path) -> dict:
+    """Parse scalar frontmatter fields (status/due/title/type/…). Lists are skipped."""
+    text = path.read_text()
+    if not text.startswith("---\n"):
+        return {}
+    try:
+        end = text.index("\n---\n", 4)
+    except ValueError:
+        return {}
+    fm = {}
+    for line in text[4:end].split("\n"):
+        m = re.match(r"^(\w+):\s*(.+)$", line)
+        if m:
+            fm[m.group(1)] = m.group(2).strip()
+    return fm
+
+
+def due_reminders(now: datetime | None = None) -> list[tuple[Path, str, datetime]]:
+    """Pending reminders whose `due` is at or before `now` — (path, task, due)."""
+    now = now or datetime.now()
+    d = _vault() / "reminders"
+    out = []
+    if not d.exists():
+        return out
+    for f in d.glob("*.md"):
+        fm = _read_frontmatter(f)
+        if fm.get("status") != "pending" or not fm.get("due"):
+            continue
+        try:
+            due_dt = datetime.fromisoformat(fm["due"])
+        except ValueError:
+            continue
+        if due_dt <= now:
+            out.append((f, fm.get("title", "reminder"), due_dt))
+    return out
+
+
+def mark_reminder(path: Path, status: str = "done") -> None:
+    """Flip a reminder's status (pending → done) and commit."""
+    text = path.read_text()
+    new = re.sub(r"^status:\s*\w+$", f"status: {status}", text, count=1, flags=re.MULTILINE)
+    if new != text:
+        path.write_text(new)
+        _commit(_vault(), path, f"reminder {status}: {path.name}")
+
+
 def add_meeting(transcript: str, summary: str, timestamp: datetime | None = None) -> Path:
     """Write a meeting (summary + full transcript) to its own Markdown file."""
     ts = timestamp or datetime.now()

@@ -146,7 +146,7 @@ export interface VaultEntry {
  * Reads the vault's notes/ or meetings/ folder (via the Rust backend, which
  * resolves the configured vault path). Newest first; [] if none yet.
  */
-export async function readVault(kind: 'notes' | 'meetings' | 'initiatives' | 'dreams'): Promise<VaultEntry[]> {
+export async function readVault(kind: 'notes' | 'meetings' | 'initiatives' | 'dreams' | 'reminders'): Promise<VaultEntry[]> {
     try {
         return await invoke<VaultEntry[]>('read_vault', { kind });
     } catch (error) {
