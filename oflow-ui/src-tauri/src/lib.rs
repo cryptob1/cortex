@@ -298,7 +298,8 @@ struct DreamResult {
 /// shows a spinner.
 #[tauri::command]
 async fn run_dream() -> Result<DreamResult, String> {
-    let json = run_brain_json(&["--dream"])?;
+    // Manual dream always runs (the nightly timer coordinates via --dream alone).
+    let json = run_brain_json(&["--dream", "--force"])?;
     serde_json::from_str(&json).map_err(|e| format!("parse error: {}", e))
 }
 

@@ -2174,6 +2174,10 @@ class VoiceDictationServer:
         while getattr(self, "_running", True):
             try:
                 for path, task, _due in brain.due_reminders():
+                    # Re-check right before firing: another synced device may have
+                    # just fired + marked it done (multi-device dedup).
+                    if brain._read_frontmatter(path).get("status") != "pending":
+                        continue
                     _notify("⏰ Reminder", task)
                     brain.mark_reminder(path, "done")
                     logger.info(f"Reminder fired: {task}")

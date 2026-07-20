@@ -503,11 +503,24 @@ def _write_dream_journal(linked: int, updated: list, stale: list,
     )
 
 
-def dream() -> dict:
+def dream(force: bool = False) -> dict:
     """The consolidation pass: re-link captures, refresh each initiative's status
-    snapshot, flag quiet initiatives, suggest emergent ones, and journal it."""
+    snapshot, flag quiet initiatives, suggest emergent ones, and journal it.
+
+    Multi-device coordination: unless `force`, skip if a dream journal dated today
+    already exists in the (synced) vault — so on several laptops the first one awake
+    claims the night and the rest stand down, avoiding duplicate journals and
+    conflicting edits to initiative files. The manual "Dream now" passes force=True.
+    """
     ts = datetime.now()
     vault = brain._vault()
+    if not force:
+        d = vault / "dreams"
+        today = f"{ts:%Y-%m-%d}"
+        if d.exists() and any(f.name.startswith(today) for f in d.glob("*.md")):
+            logger.info("Dream skipped — already done today")
+            return {"skipped": True, "relinked": 0, "initiatives": 0,
+                    "stale": [], "suggestions": [], "journal": ""}
     linked = link_all()
     inits = list_initiatives()
     updated = []
@@ -562,7 +575,10 @@ def main() -> None:
         print(json.dumps(data) if as_json else f"# {data['title']}\n\n{data['status']}")
         return
     if args[0] == "--dream":
-        r = dream()
+        r = dream(force="--force" in args)
+        if r.get("skipped"):
+            print(json.dumps(r) if as_json else "Dream skipped — already done today.")
+            return
         print(json.dumps(r) if as_json else
               f"Dreamt: {r['initiatives']} initiative(s) refreshed, {r['relinked']} re-linked, "
               f"{len(r['suggestions'])} suggestion(s). Journal: dreams/{r['journal']}")
