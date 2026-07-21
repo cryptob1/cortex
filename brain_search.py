@@ -238,11 +238,12 @@ def _initiatives() -> list[dict]:
     return out
 
 
-def _add_links_frontmatter(path: Path, new_links: list[str]) -> list[str]:
-    """Merge new_links into the item's `links:` frontmatter list; return those added."""
+def _set_links_frontmatter(path: Path, links: list[str]) -> bool:
+    """Set the item's `links:` frontmatter to exactly `links` (replace, not merge,
+    so a re-link corrects earlier mistakes). Returns True if it changed."""
     fm, body = _split(path.read_text())
     if not fm:
-        return []
+        return False
     lines, existing, kept, i = fm.split("\n"), [], [], 0
     while i < len(lines):
         if lines[i].startswith("links:"):
@@ -251,19 +252,50 @@ def _add_links_frontmatter(path: Path, new_links: list[str]) -> list[str]:
                 existing.append(lines[i][4:].strip()); i += 1
             continue
         kept.append(lines[i]); i += 1
-    added = [l for l in new_links if l not in existing]
+    if existing == links:
+        return False
     block = [x for x in kept if x.strip()]
-    merged = existing + added
-    if merged:
-        block += ["links:"] + [f"  - {l}" for l in merged]
+    if links:
+        block += ["links:"] + [f"  - {l}" for l in links]
     path.write_text("---\n" + "\n".join(block) + "\n---\n" + body)
-    return added
+    return True
+
+
+def _verify_link(capture_text: str, initiative: dict) -> bool:
+    """LLM precision check: is this capture genuinely about the initiative? Embeddings
+    over-link (a broad meeting matches a vague goal), so confirm before linking. If no
+    Groq key or the call fails, trust the embedding (return True)."""
+    key = _groq_key()
+    if not key:
+        return True
+    import httpx
+    system = (
+        "Decide whether a captured note/meeting is genuinely ABOUT the user's initiative "
+        "(a specific goal/project). Be strict: answer 'yes' only if the capture is actually "
+        "about this goal, not merely adjacent or coincidentally similar. Reply with ONLY "
+        "'yes' or 'no'."
+    )
+    user = f"Initiative: {initiative['text']}\n\nCapture:\n{capture_text[:1200]}"
+    try:
+        resp = httpx.post(
+            GROQ_CHAT_URL, headers={"Authorization": f"Bearer {key}"},
+            json={"model": ANSWER_MODEL,
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": user}],
+                  "temperature": 0.0, "max_tokens": 3},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip().lower().startswith("y")
+    except Exception as e:
+        logger.error(f"Link verify error: {e}")
+    return True
 
 
 def link_item(item_path) -> list[str]:
-    """Link a note/meeting to related initiative(s) by semantic similarity.
-    Adds the initiative ids to the item's `links` and back-logs into each
-    initiative. Returns the titles it linked to."""
+    """Link a note/meeting to the initiative(s) it's genuinely about. Embeddings
+    find candidates; an LLM confirms each; the item's `links` are recomputed
+    (replaced) so re-linking corrects prior mistakes. Returns the linked titles."""
     item_path = Path(item_path)
     inits = _initiatives()
     if not item_path.exists() or not inits:
@@ -274,21 +306,16 @@ def link_item(item_path) -> list[str]:
 
     vecs = _embed([text] + [i["text"] for i in inits])
     sims = vecs[1:] @ vecs[0]
-    matched = [i for s, i in sorted(zip(sims, inits), key=lambda x: -x[0]) if s >= LINK_THRESHOLD][:LINK_MAX]
-    if not matched:
-        return []
+    candidates = [i for s, i in sorted(zip(sims, inits), key=lambda x: -x[0])
+                  if s >= LINK_THRESHOLD][:LINK_MAX]
+    matched = [i for i in candidates if _verify_link(text, i)]
 
-    _add_links_frontmatter(item_path, [i["id"] for i in matched])
-    _, body = _split(item_path.read_text())
-    snippet = next((l.strip() for l in body.splitlines() if l.strip() and not l.startswith("#")), "")[:100]
-    for i in matched:
-        with open(i["file"], "a") as f:
-            f.write(f"- [[{item_path.stem}]] ({item_path.parent.name}) — {snippet}\n")
+    if not _set_links_frontmatter(item_path, [i["id"] for i in matched]):
+        return [i["title"] for i in matched]
 
     vault = brain._vault()
     if brain._git_enabled() and brain._is_git_repo(vault):
-        for p in [item_path, *[i["file"] for i in matched]]:
-            brain._git(vault, "add", str(p))
+        brain._git(vault, "add", str(item_path))
         if brain._git(vault, "commit", "-m", f"link {item_path.name} → {len(matched)} initiative(s)"):
             if brain._git_push_enabled():
                 brain._git(vault, "push")

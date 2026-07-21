@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Sparkles, Loader2, AlertCircle } from "lucide-react";
+import { Markdown } from "@/components/ui/markdown";
 import { askBrain } from "@/lib/api";
 
 /**
@@ -82,7 +83,7 @@ export function AskView() {
                             </div>
                         ) : (
                             <>
-                                <p className="whitespace-pre-wrap leading-relaxed">{answer}</p>
+                                <Markdown>{answer ?? ""}</Markdown>
                                 {sources.length > 0 && (
                                     <div className="mt-4 flex flex-wrap gap-2">
                                         {sources.map((s) => (
