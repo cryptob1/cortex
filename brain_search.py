@@ -35,7 +35,9 @@ ANSWER_MODEL = "llama-3.3-70b-versatile"
 # Index
 # --------------------------------------------------------------------------- #
 def _index_dir():
-    d = brain._vault() / ".index"
+    # Outside the vault: the embedding index is derived/rebuildable and shouldn't
+    # bloat Obsidian Sync (the vault may be a subfolder of an Obsidian vault).
+    d = Path.home() / ".cache" / "oflow" / "index"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
