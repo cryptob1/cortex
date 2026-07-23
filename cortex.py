@@ -852,7 +852,29 @@ class StorageManager:
             entry["app"] = app
         with open(self.transcripts_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        self._mirror_to_vault_stream(entry)
         logger.info(f"Saved transcript #{self.count_transcripts()}")
+
+    def _mirror_to_vault_stream(self, entry: dict) -> None:
+        """Also append this dictation to a synced, per-machine daily stream in the
+        vault — journal/streams/<date>/<host>.jsonl. One file per machine (never
+        collides), so the nightly journal can aggregate what you dictated across
+        ALL your machines into one coherent day. Best-effort: a vault/sync problem
+        must never break dictation. These raw .jsonl streams stay out of Ask (the
+        RAG only indexes .md)."""
+        if not _HAS_BRAIN:
+            return
+        try:
+            date = str(entry.get("timestamp", ""))[:10]  # YYYY-MM-DD
+            if not date:
+                return
+            host = re.sub(r"[^\w.-]", "_", socket.gethostname() or "unknown")
+            d = brain._vault() / "journal" / "streams" / date
+            d.mkdir(parents=True, exist_ok=True)
+            with open(d / f"{host}.jsonl", "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            logger.debug("vault stream mirror skipped", exc_info=True)
 
     def count_transcripts(self) -> int:
         """Count total transcripts."""

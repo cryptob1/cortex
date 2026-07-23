@@ -566,11 +566,26 @@ def dream(force: bool = False) -> dict:
     """
     ts = datetime.now()
     vault = brain._vault()
+
+    # Refresh recent daily journals first. This is idempotent and aggregates
+    # dictations ACROSS machines (via the synced streams), so it runs on every
+    # machine's dream — even the ones that stand down from the shared
+    # consolidation below. Covering the last couple of days lets a machine that
+    # was offline, or whose stream synced late, still fold its dictations in.
+    for back in (1, 2):
+        try:
+            journal_day((ts - timedelta(days=back)).strftime("%Y-%m-%d"))
+        except Exception:
+            logger.debug("Daily journal failed", exc_info=True)
+
+    # The heavy consolidation edits SHARED files (initiative statuses), so only
+    # one machine per night should do it: the first awake claims the night (a
+    # dream journal dated today), the rest stand down to avoid conflicting edits.
     if not force:
         d = vault / "dreams"
         today = f"{ts:%Y-%m-%d}"
         if d.exists() and any(f.name.startswith(today) for f in d.glob("*.md")):
-            logger.info("Dream skipped — already done today")
+            logger.info("Dream: journals refreshed; consolidation already claimed today")
             return {"skipped": True, "relinked": 0, "initiatives": 0,
                     "stale": [], "suggestions": [], "journal": ""}
     linked = link_all()
@@ -585,11 +600,6 @@ def dream(force: bool = False) -> dict:
         updated.append({"title": it["title"], "linked": st["linked"]})
     stale = [it["title"] for it in inits if it["linked"] == 0]
     suggestions = _suggest_initiatives()
-    # Journal the day that just ended (dictation stream → a daily "what I worked on").
-    try:
-        journal_day((ts - timedelta(days=1)).strftime("%Y-%m-%d"))
-    except Exception:
-        logger.debug("Daily journal failed", exc_info=True)
     journal = _write_dream_journal(linked, updated, stale, suggestions, ts)
     logger.info(f"Dream: {len(inits)} initiatives refreshed, {linked} re-linked, "
                 f"{len(suggestions)} suggestion(s)")
@@ -617,23 +627,47 @@ JOURNAL_PROMPT = (
 )
 
 
-def journal_day(date_str: str | None = None) -> dict:
-    """Synthesize a daily journal from that day's dictations (transcripts.jsonl)."""
-    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
-    if not TRANSCRIPTS_FILE.exists():
-        return {"skipped": True, "reason": "no dictations", "date": date_str}
-    lines = []
-    for raw_line in TRANSCRIPTS_FILE.read_text().splitlines():
+def _journal_records(date_str: str) -> list[dict]:
+    """That day's dictation records, aggregated ACROSS machines and time-ordered.
+
+    Prefers the synced per-machine streams — journal/streams/<date>/<host>.jsonl,
+    each machine mirrors its own dictations there — so the journal reflects your
+    whole day everywhere. Falls back to this machine's local transcripts.jsonl
+    when no streams exist yet (single machine / pre-migration). When streams are
+    present, the local file is ignored to avoid double-counting this machine."""
+    stream_dir = brain._vault() / "journal" / "streams" / date_str
+    sources = sorted(stream_dir.glob("*.jsonl")) if stream_dir.exists() else []
+    if not sources and TRANSCRIPTS_FILE.exists():
+        sources = [TRANSCRIPTS_FILE]
+    recs: list[dict] = []
+    for f in sources:
         try:
-            d = json.loads(raw_line)
-        except ValueError:
+            content = f.read_text()
+        except Exception:
             continue
-        ts = d.get("timestamp", "")
-        if not ts.startswith(date_str):
-            continue
+        for raw_line in content.splitlines():
+            try:
+                d = json.loads(raw_line)
+            except ValueError:
+                continue
+            if str(d.get("timestamp", "")).startswith(date_str):
+                recs.append(d)
+    recs.sort(key=lambda d: d.get("timestamp", ""))
+    return recs
+
+
+def journal_day(date_str: str | None = None) -> dict:
+    """Synthesize a daily journal from that day's dictations, aggregated across
+    every machine (via the synced streams — see _journal_records). Idempotent:
+    one file per day that re-running overwrites, so machines converge as their
+    stream fragments sync in."""
+    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+    lines = []
+    for d in _journal_records(date_str):
         text = (d.get("cleaned") or d.get("raw") or "").strip()
         if len(text) < 3:
             continue
+        ts = str(d.get("timestamp", ""))
         app = d.get("app", "")
         lines.append(f"[{ts[11:16]}]" + (f" [{app}]" if app else "") + f" {text}")
     if len(lines) < 3:
