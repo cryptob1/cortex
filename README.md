@@ -21,9 +21,11 @@ Built for **Wayland**, **Hyprland**, and **Omarchy**. Open source, transcripts s
 - **Instant transcription** — Groq Whisper (`whisper-large-v3-turbo`), ~0.6s latency
 - **Push-to-talk** — Hold the **Copilot key** to record, release to stop & paste
 - **One-shot paste** — Pastes the whole result at once (via ydotool), not char-by-char
-- **📝 Note capture** — **Copilot+N** saves a hands-free note to your second brain instead of pasting ([see below](#-second-brain-notes-meetings--ask))
-- **🎙️ Meeting recording** — **Copilot+M** records a call (system audio + your mic), then transcribes & summarizes it into the brain
-- **🧠 Ask your brain** — natural-language, cited search over every note & meeting — runs locally (on-device embeddings), no extra API key
+- **🧠 Second brain** — capture notes (**Copilot+N**) & meetings (**Copilot+M**) into a plain-Markdown, Obsidian-compatible vault ([see below](#-second-brain))
+- **🎯 Initiatives** — say *"start an initiative…"*; notes & meetings auto-link to your goals, with an AI status per goal
+- **🌙 Dreams & 📖 Journal** — nightly, oflow consolidates your captures into your goals and reconstructs *what you worked on* each day from your dictations
+- **⏰ Reminders** — say *"remind me to… Friday at 3"*; oflow notifies you when it's due
+- **Ask your brain** — natural-language, cited search over your whole vault — local embeddings, no extra API key
 - **On-screen overlay** — Live recording level meter at the bottom of the screen
 - **Pauses your media** — Auto-pauses playing music/video while you dictate, resumes after
 - **Voice commands** — Say "jarvis scratch that", "jarvis select all", "jarvis enter" and oflow presses the real keys ([see below](#-voice-commands))
@@ -127,40 +129,78 @@ Dictation is more than typing — say **"jarvis"** followed by a command and ofl
 
 The wake word is configurable in **Settings → Spoken Commands** (default `jarvis` — a name Whisper transcribes reliably; pick any word it hears cleanly), and the recording overlay rotates a hint each time so the commands are easy to discover.
 
-## 🧠 Second brain (notes, meetings & Ask)
+## 🧠 Second brain
 
-Beyond dictation, oflow can capture straight into a personal knowledge base — a plain-Markdown **vault** (default `~/brain`) that's [Obsidian](https://obsidian.md)-compatible and git-backed. Two extra hotkeys ride on the Copilot key (which holds Super+Shift, so these are `Super+Shift+N` / `Super+Shift+M`):
+Beyond dictation, oflow captures into a personal knowledge base — a plain-Markdown **vault** (default `~/brain`, or a subfolder of your existing [Obsidian](https://obsidian.md) vault). Every item is one Markdown file with a human title and YAML frontmatter, so it reads cleanly in Obsidian and syncs conflict-free. Then it **organizes and reflects on** what you capture.
 
-| Gesture | Mode | What happens |
+### Capture — all by voice
+
+Extra hotkeys ride on the Copilot key (which holds Super+Shift, so these are `Super+Shift+N` / `Super+Shift+M`); **initiatives** and **reminders** are just spoken *inside* a note:
+
+| Gesture / phrase | Type | What happens |
 |---|---|---|
 | Hold **Copilot** | **Dictate** | transcribe → paste into the focused app *(unchanged)* |
-| **Copilot + N** (toggle) | **Note** | records hands-free; on the second press, saves the cleaned text to `~/brain/notes/` |
-| **Copilot + M** (toggle) | **Meeting** | records **system audio + your mic** mixed; on stop, transcribes (auto-chunked), summarizes (title / key points / decisions / action items), and files it to `~/brain/meetings/` |
-
-Each capture is one Markdown file and is git-committed automatically. Notifications tell you when recording starts, stops, and saves.
+| **Copilot + N** (toggle) | **Note** | hands-free note → `notes/` |
+| **Copilot + M** (toggle) | **Meeting** | records **system audio + your mic**, transcribes (auto-chunked) + summarizes (key points / decisions / action items) → `meetings/` |
+| Note: *"start an initiative to…"* | **Initiative** | a tracked goal (name + goals) → `initiatives/` |
+| Note: *"remind me to… \<when\>"* | **Reminder** | task + due time (natural language resolved) → `reminders/`; fires a desktop notification when due |
 
 ### Ask your brain
 
-The desktop app's **Ask** tab (and the `oflow-brain` CLI) answer natural-language questions over everything you've captured:
+The app's **Ask** tab (and the `oflow-brain` CLI) answer natural-language questions over your whole vault:
 
 ```bash
 oflow-brain "what did we decide about onboarding?"
 ```
 
-It's a **local RAG**: your notes & meetings are embedded on-device with [`fastembed`](https://github.com/qdrant/fastembed) (ONNX, no API key), the most relevant chunks are retrieved, and Groq synthesizes a **cited** answer. The index lives in `~/brain/.index` (rebuilds itself when the vault changes) — your Markdown stays the source of truth.
+A **local RAG**: content is embedded on-device with [`fastembed`](https://github.com/qdrant/fastembed) (ONNX, no API key), the most relevant chunks are retrieved, and Groq synthesizes a **cited** answer. The index lives outside the vault (`~/.cache/oflow`, rebuildable) so it never bloats sync.
+
+### Initiatives — goals your brain tracks
+
+Every note and meeting is **automatically linked** to the initiatives it relates to (semantic match + an LLM check for precision). The **Initiatives** tab shows each goal with an on-demand **coach-style status** — momentum, recent activity (cited), open action items, next steps — synthesized from everything linked to it.
+
+### Dreams & Journal — reflection, nightly
+
+- **Dreams**: a nightly consolidation pass re-links captures, refreshes each initiative's status, flags stale goals, and suggests emergent initiatives from recurring themes — leaving a **dream journal** you read in the morning. Self-coordinating across machines (one runs per night).
+- **Journal**: reconstructs *what you worked on* each day from your dictation stream (timestamps + the app each snippet went into) into a readable **Summary / Timeline / by-theme** log. The noisy stream stays local; only the synthesized journal lands in your vault.
 
 ### Sync across devices
 
-Because the vault is just a git repo of Markdown, sync it however you like — a private git remote (turn on **auto-push** in Settings), [Syncthing](https://syncthing.net) (great for background, keyless, cross-device sync incl. Android), or Obsidian Sync. Open the folder in **Obsidian mobile** to read and search your brain on your phone. Notes are one file each (never conflict on sync); meetings likewise.
+The vault is just a folder of Markdown, so sync it with whatever you like — and oflow is built to be **multi-device-safe** (one file per capture, deduped reminders, self-coordinating dreams, index kept out of the vault):
+
+- **Obsidian Sync** — put the vault inside your Obsidian vault (a `<vault>/oflow` subfolder); set **Search root** to the whole vault so Ask covers your existing notes too. Keep Obsidian running (autostart) for continuous sync. *Easiest if you already use Obsidian.*
+- **Syncthing** — background, free, private P2P (great incl. Android).
+- **Cloud drive / git** — a Dropbox/Drive folder, or a private git remote (enable **auto-push** in Settings).
+
+Read and search everything on your phone with **Obsidian mobile**. New machine? See [Multi-machine setup](#multi-machine-setup).
+
+## Multi-machine setup
+
+oflow is **sync-agnostic**: it reads and writes a plain-Markdown folder, and everything is designed to be safe across machines — one file per capture (never collide), reminders deduped across devices, dreams self-coordinate to one run per night, and the search index lives *outside* the vault so it never syncs. Pick any sync tool for the vault folder; oflow does the rest.
+
+**New machine — one command** (does the oflow side; the vault syncs via your chosen tool):
+
+```bash
+git clone https://github.com/cryptob1/oflow.git ~/code/oflow
+bash ~/code/oflow/scripts/setup-machine.sh
+```
+
+It runs `make install`, then asks for this machine's synced-vault path and your API key and writes the config (`brainVaultPath = <vault>/oflow`, `brainReadRoot = <vault>`, `brainGit = false`). Then sync that vault folder:
+
+- **Obsidian Sync** — open the vault in Obsidian, enable Sync, and autostart Obsidian (continuous while it runs).
+- **Syncthing / cloud drive / git remote** — share the vault folder between machines.
+
+Two devices point oflow at their *own* local copy of the same synced vault — captures made anywhere show up everywhere.
 
 ## Tech Stack
 
 - **Transcription**: [Groq Whisper](https://groq.com) `large-v3-turbo` (or ElevenLabs Scribe / OpenAI / Deepgram) — ~300× realtime, ~$0.04/hr
-- **Text cleanup & summaries**: Llama (3.1 8B cleanup / 3.3 70B meeting summaries) via Groq
+- **Cleanup / summaries / initiatives / journal**: Llama (3.1 8B cleanup, 3.3 70B for summaries, status, journal) via Groq
 - **Meeting audio**: PipeWire null-sink mixing system output + mic, captured with `pw-record`
-- **Second brain**: plain-Markdown vault (git-backed) + local [`fastembed`](https://github.com/qdrant/fastembed) embeddings for on-device semantic search
+- **Second brain**: plain-Markdown vault (Obsidian-compatible) + local [`fastembed`](https://github.com/qdrant/fastembed) embeddings for on-device semantic search & auto-linking (index kept outside the vault)
+- **Sync**: none built-in — sync-agnostic (Obsidian Sync / Syncthing / cloud / git); multi-device-safe by design
 - **Backend**: Python with asyncio + httpx
-- **Desktop app**: [Tauri](https://tauri.app) + React
+- **Desktop app**: [Tauri](https://tauri.app) + React (Dashboard · Ask · Initiatives · Dreams · Journal · Reminders · History · Notes · Meetings · Settings)
 
 ## For LLMs / AI coding agents
 
@@ -282,17 +322,18 @@ Settings are stored in `~/.oflow/settings.json`:
   "wordReplacements": {},             // Custom word corrections {"oflow": "Oflow"}
 
   // Second brain (Settings → Second Brain)
-  "brainVaultPath": "~/brain",        // Where notes & meetings are saved (Obsidian-compatible)
-  "brainGit": true,                   // Git-commit each capture (if the vault is a repo)
-  "brainGitPush": false               // Also push after each commit (for cross-device sync)
+  "brainVaultPath": "~/brain",        // Where oflow WRITES captures (e.g. "<vault>/oflow")
+  "brainReadRoot": "",                // Where Ask/initiatives READ (whole vault); "" = brainVaultPath
+  "brainGit": false                   // Git-commit each capture; leave off when a sync tool handles history
 }
 ```
 
 A few behaviors are tuned with environment variables (e.g. in `~/.oflow/.env`):
 
 ```bash
-OFLOW_BRAIN_DIR=~/brain                 # overrides brainVaultPath
-OFLOW_BRAIN_GIT_PUSH=true               # overrides brainGitPush
+OFLOW_BRAIN_DIR=~/brain                 # overrides brainVaultPath (write root)
+OFLOW_BRAIN_READ_DIR=~/Documents/work   # overrides brainReadRoot (search whole vault)
+OFLOW_LINK_THRESHOLD=0.45               # embedding recall for initiative auto-linking (LLM verifies)
 OFLOW_MAX_TRANSCRIBE_CONCURRENCY=12     # cap parallel chunk requests (long meetings)
 OFLOW_MIC_WARMUP_MS=250                 # on-demand mic warm-up before capture
 OFLOW_PERSISTENT_MIC=false              # keep the mic stream warm across dictations
