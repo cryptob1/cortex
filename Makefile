@@ -111,7 +111,7 @@ lint:
 	@echo "Linting code..."
 	@ruff check .
 
-install: setup-backend build setup-hotkey setup-waybar setup-waybar-css setup-autostart setup-osd
+install: setup-backend _ensure-sidecar-stub build setup-hotkey setup-waybar setup-waybar-css setup-autostart setup-osd setup-dream
 	@echo "Installing oflow..."
 	@mkdir -p ~/.local/bin
 	@cp oflow-ui/src-tauri/target/release/oflow-ui ~/.local/bin/oflow
@@ -122,6 +122,15 @@ setup-osd:
 	@mkdir -p ~/.local/share/oflow
 	@cp oflow-osd.py ~/.local/share/oflow/oflow-osd.py
 	@echo "Overlay installed (needs: gtk4-layer-shell python-gobject python-cairo)"
+
+setup-dream:
+	@echo "Installing nightly dream + journal timer..."
+	@mkdir -p ~/.config/systemd/user
+	@printf '[Unit]\nDescription=oflow nightly dream (consolidate brain + write the daily journal)\n\n[Service]\nType=oneshot\nExecStart=%s/.local/bin/oflow-brain --dream\n' "$$HOME" > ~/.config/systemd/user/oflow-dream.service
+	@printf '[Unit]\nDescription=Run the oflow dream nightly\n\n[Timer]\nOnCalendar=*-*-* 03:30:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' > ~/.config/systemd/user/oflow-dream.timer
+	@systemctl --user daemon-reload 2>/dev/null || true
+	@systemctl --user enable --now oflow-dream.timer 2>/dev/null || true
+	@echo "  Dream/journal timer enabled (nightly 03:30)"
 
 # --- Fast iteration ----------------------------------------------------------
 # reload: restart the running app. Picks up Python backend (oflow.py) and

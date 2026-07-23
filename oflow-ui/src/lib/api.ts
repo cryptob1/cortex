@@ -26,6 +26,7 @@ export interface Settings {
     submitKeywords?: string[];
     // Second brain (note & meeting capture)
     brainVaultPath?: string;
+    brainReadRoot?: string;
     brainGit?: boolean;
     brainGitPush?: boolean;
 }

@@ -44,6 +44,7 @@ export function SettingsView() {
     const [fastWordsInput, setFastWordsInput] = useState("8");
     const [wakeWordInput, setWakeWordInput] = useState("jarvis");
     const [vaultPathInput, setVaultPathInput] = useState("~/brain");
+    const [readRootInput, setReadRootInput] = useState("");
     const wakeWord = (settings.commandWakeWord || "jarvis").trim() || "jarvis";
 
     useEffect(() => {
@@ -75,6 +76,9 @@ export function SettingsView() {
                 }
                 if (loadedSettings.brainVaultPath) {
                     setVaultPathInput(loadedSettings.brainVaultPath);
+                }
+                if (loadedSettings.brainReadRoot) {
+                    setReadRootInput(loadedSettings.brainReadRoot);
                 }
             } catch (error) {
                 console.error("Failed to load settings:", error);
@@ -120,6 +124,10 @@ export function SettingsView() {
         const p = vaultPathInput.trim() || "~/brain";
         setVaultPathInput(p);
         await handleSettingChange("brainVaultPath", p);
+    };
+
+    const handleSaveReadRoot = async () => {
+        await handleSettingChange("brainReadRoot", readRootInput.trim());
     };
 
     const handleClearHistory = async () => {
@@ -672,8 +680,28 @@ export function SettingsView() {
                                 </Button>
                             </div>
                             <p className="text-xs text-muted-foreground">
-                                Plain Markdown, Obsidian-compatible. Notes append to <code>notes/</code>;
-                                meetings get their own file in <code>meetings/</code>. Point Obsidian here.
+                                Where oflow <strong>writes</strong> captures. Plain Markdown, Obsidian-compatible.
+                                To keep it inside an existing vault, use a subfolder like <code>&lt;vault&gt;/oflow</code>.
+                            </p>
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="readRoot">Search root (optional)</Label>
+                            <div className="flex gap-2">
+                                <Input
+                                    id="readRoot"
+                                    value={readRootInput}
+                                    onChange={(e) => setReadRootInput(e.target.value)}
+                                    placeholder="(defaults to the vault folder above)"
+                                    disabled={isLoading}
+                                />
+                                <Button variant="outline" onClick={handleSaveReadRoot} disabled={isLoading}>
+                                    Save
+                                </Button>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Where Ask &amp; initiatives <strong>read</strong> from. Set to your whole Obsidian
+                                vault (e.g. <code>~/Documents/work</code>) so they cover your existing notes too —
+                                oflow still only writes to the folder above.
                             </p>
                         </div>
                         <div className="flex items-center justify-between space-x-2">
