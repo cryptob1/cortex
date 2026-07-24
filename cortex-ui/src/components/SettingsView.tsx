@@ -5,7 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { loadSettings, saveSettings, clearHistory, type Settings } from "@/lib/api";
-import { Eye, EyeOff, Shield, Zap, Keyboard, Brain } from "lucide-react";
+import { Eye, EyeOff, Shield, Zap, Keyboard, Brain, Monitor } from "lucide-react";
 import { useToast } from "@/components/ui/toast";
 
 // Mirrors SPOKEN_ACTIONS in cortex.py. Shown read-only so users can see what
@@ -45,6 +45,8 @@ export function SettingsView() {
     const [wakeWordInput, setWakeWordInput] = useState("jarvis");
     const [vaultPathInput, setVaultPathInput] = useState("~/brain");
     const [readRootInput, setReadRootInput] = useState("");
+    const [showGeminiKey, setShowGeminiKey] = useState(false);
+    const [geminiKeyInput, setGeminiKeyInput] = useState("");
     const wakeWord = (settings.commandWakeWord || "jarvis").trim() || "jarvis";
 
     useEffect(() => {
@@ -79,6 +81,9 @@ export function SettingsView() {
                 }
                 if (loadedSettings.brainReadRoot) {
                     setReadRootInput(loadedSettings.brainReadRoot);
+                }
+                if (loadedSettings.geminiApiKey) {
+                    setGeminiKeyInput(loadedSettings.geminiApiKey);
                 }
             } catch (error) {
                 console.error("Failed to load settings:", error);
@@ -744,6 +749,87 @@ export function SettingsView() {
                                 checked={settings.brainGitPush ?? false}
                                 onCheckedChange={(c) => handleSettingChange("brainGitPush", c)}
                                 disabled={isLoading}
+                            />
+                        </div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Monitor className="h-5 w-5" />
+                            Screen Context
+                        </CardTitle>
+                        <CardDescription>
+                            Understand the active window with Gemini 2.5 Flash, so the journal &amp; dreams
+                            see the silent work — reading, coding, browsing — that dictation misses.
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                        <div className="flex items-center justify-between space-x-2">
+                            <div className="space-y-1">
+                                <Label htmlFor="screenContext">Enable screen context</Label>
+                                <p className="text-sm text-muted-foreground">
+                                    At each dictation and on window change, capture the focused window
+                                    (that window only) and log a one-line description. The screenshot is
+                                    discarded after the call — only the text is kept.
+                                </p>
+                            </div>
+                            <Switch
+                                id="screenContext"
+                                checked={settings.screenContext ?? false}
+                                onCheckedChange={(c) => handleSettingChange("screenContext", c)}
+                                disabled={isLoading}
+                            />
+                        </div>
+
+                        <div className={`space-y-2 ${(settings.screenContext ?? false) ? '' : 'opacity-50'}`}>
+                            <Label htmlFor="geminiKey">Gemini API Key</Label>
+                            <div className="flex gap-2">
+                                <div className="relative flex-1">
+                                    <Input
+                                        id="geminiKey"
+                                        type={showGeminiKey ? "text" : "password"}
+                                        placeholder="AIza..."
+                                        value={geminiKeyInput}
+                                        onChange={(e) => setGeminiKeyInput(e.target.value)}
+                                        disabled={isLoading}
+                                    />
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                                        onClick={() => setShowGeminiKey(!showGeminiKey)}
+                                    >
+                                        {showGeminiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                    </Button>
+                                </div>
+                                <Button
+                                    onClick={() => handleSettingChange("geminiApiKey", geminiKeyInput.trim())}
+                                    disabled={isLoading || isSaving}
+                                >
+                                    Save
+                                </Button>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Get one free at <code>aistudio.google.com/apikey</code>. Without a key, screen
+                                context stays off — nothing is captured (no local processing).
+                            </p>
+                        </div>
+
+                        <div className={`flex items-center justify-between space-x-2 ${(settings.screenContext ?? false) ? '' : 'opacity-50'}`}>
+                            <div className="space-y-1">
+                                <Label htmlFor="screenAcOnly">Only on AC power</Label>
+                                <p className="text-sm text-muted-foreground">
+                                    Pause capture while on battery.
+                                </p>
+                            </div>
+                            <Switch
+                                id="screenAcOnly"
+                                checked={settings.screenContextACOnly ?? false}
+                                onCheckedChange={(c) => handleSettingChange("screenContextACOnly", c)}
+                                disabled={isLoading || !(settings.screenContext ?? false)}
                             />
                         </div>
                     </CardContent>

@@ -29,6 +29,10 @@ export interface Settings {
     brainReadRoot?: string;
     brainGit?: boolean;
     brainGitPush?: boolean;
+    // Screen context (vision understanding of the active window)
+    screenContext?: boolean;
+    screenContextACOnly?: boolean;
+    geminiApiKey?: string;
 }
 
 /**
