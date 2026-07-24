@@ -176,6 +176,10 @@ REMINDER_POLL_SECONDS = int(os.getenv("CORTEX_REMINDER_POLL_SECONDS", "30"))
 # journal/dream. It only records when the window actually changed, so this is a
 # ceiling, not a fixed rate.
 SCREEN_SAMPLE_SECONDS = int(os.getenv("CORTEX_SCREEN_SAMPLE_SECONDS", "60"))
+# Don't re-describe the same window (class+title) more than once within this
+# window — sitting in, or returning to, a window shouldn't spam near-identical
+# captures. Default 15 minutes.
+SCREEN_REVISIT_SECONDS = int(os.getenv("CORTEX_SCREEN_REVISIT_SECONDS", str(15 * 60)))
 # Windows never OCR'd — sensitive apps whose contents shouldn't be logged even
 # locally. Substring match against the window's class + title (case-insensitive).
 DEFAULT_SCREEN_DENYLIST = [
@@ -1786,11 +1790,19 @@ def _gemini_key() -> str | None:
     return brain._settings().get("geminiApiKey") if _HAS_BRAIN else None
 
 
+_screen_last_capture: dict[tuple, float] = {}
+_screen_last_capture_lock = threading.Lock()
+
+
 def _capture_screen_context(storage, hint: str = "") -> None:
     """Grab the active window, distill it (Gemini vision → one line), and log it as
     an activity record. Best-effort; safe to call from a thread. Requires a vision
     key — without one we don't capture at all (no surprise local processing); OCR is
-    only a fallback if an individual vision call fails."""
+    only a fallback if an individual vision call fails.
+
+    Throttled per window (class+title): the same window is captured at most once
+    every SCREEN_REVISIT_SECONDS, so both the dictation hook and the sampler skip a
+    window you were just in."""
     key = _gemini_key()
     if not _screen_context_enabled() or not key:
         return
@@ -1798,12 +1810,30 @@ def _capture_screen_context(storage, hint: str = "") -> None:
         import screen
     except ImportError:
         return
+    w = screen._active_window()
+    win_key = ((w.get("class") or ""), (w.get("title") or ""))
+    if not any(win_key):
+        return
+    now = time.monotonic()
+    with _screen_last_capture_lock:
+        # Prune expired entries so the map only holds currently-throttled windows.
+        for k in [k for k, t in _screen_last_capture.items()
+                  if now - t >= SCREEN_REVISIT_SECONDS]:
+            del _screen_last_capture[k]
+        if win_key in _screen_last_capture:
+            return  # same window captured recently — skip
+        _screen_last_capture[win_key] = now  # reserve before the slow call
     try:
         rec = screen.describe_active_window(_screen_denylist(), key, hint)
         if rec:
             storage.append_activity(rec)
             logger.debug("Screen context logged (%s): %s", rec.get("mode"), rec.get("app"))
+        else:  # denylisted / nothing captured — free the slot so it isn't blocked
+            with _screen_last_capture_lock:
+                _screen_last_capture.pop(win_key, None)
     except Exception:
+        with _screen_last_capture_lock:
+            _screen_last_capture.pop(win_key, None)
         logger.debug("Screen context capture failed", exc_info=True)
 
 
@@ -2303,26 +2333,14 @@ class VoiceDictationServer:
                              name="cortex-screen").start()
 
     def _screen_sampler_loop(self):
-        """When enabled, describe the active window on a slow tick — but only when
-        the window actually changed, so we don't re-caption a window you're sitting
-        in (saves vision calls and avoids near-duplicate entries)."""
+        """When enabled, describe the active window on a slow tick. The per-window
+        throttle in _capture_screen_context (15 min) skips a window you're sitting in
+        or returning to, so most ticks are a cheap no-op."""
         storage = StorageManager()
-        last_win = None
         while getattr(self, "_running", True):
             time.sleep(SCREEN_SAMPLE_SECONDS)
-            if not _screen_context_enabled():
-                last_win = None
-                continue
-            try:
-                import screen
-                w = screen._active_window()  # cheap identity probe (no screenshot)
-                win = ((w.get("class") or ""), (w.get("title") or ""))
-                if win == last_win or not any(win):
-                    continue  # same window as last sample — skip
-                last_win = win
+            if _screen_context_enabled():
                 _capture_screen_context(storage)
-            except Exception:
-                logger.debug("Screen sample failed", exc_info=True)
 
     def _reminder_watch_loop(self):
         """Poll the vault for due reminders and fire a notification for each."""
