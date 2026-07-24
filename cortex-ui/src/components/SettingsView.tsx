@@ -817,6 +817,22 @@ export function SettingsView() {
                                 is captured. Capture is a quick screenshot sent to the cloud — no local processing.
                             </p>
                         </div>
+
+                        <div className={`flex items-center justify-between space-x-2 ${(settings.screenContext ?? true) ? '' : 'opacity-50'}`}>
+                            <div className="space-y-1">
+                                <Label htmlFor="screenSaveShots">Save screenshots locally</Label>
+                                <p className="text-sm text-muted-foreground">
+                                    Keep captured screenshots in <code>~/.cache/cortex/screenshots</code> so you can
+                                    verify what&apos;s captured. Off by default; never synced to the vault.
+                                </p>
+                            </div>
+                            <Switch
+                                id="screenSaveShots"
+                                checked={settings.screenContextSaveShots ?? false}
+                                onCheckedChange={(c) => handleSettingChange("screenContextSaveShots", c)}
+                                disabled={isLoading || !(settings.screenContext ?? true)}
+                            />
+                        </div>
                     </CardContent>
                 </Card>
 

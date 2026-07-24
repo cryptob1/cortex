@@ -1790,6 +1790,15 @@ def _gemini_key() -> str | None:
     return brain._settings().get("geminiApiKey") if _HAS_BRAIN else None
 
 
+def _screen_save_shots() -> bool:
+    """Opt-in (default off): keep captured screenshots locally so you can verify
+    what's being captured. Local only — never synced to the vault."""
+    return _HAS_BRAIN and bool(brain._settings().get("screenContextSaveShots", False))
+
+
+SCREENSHOT_DIR = Path.home() / ".cache" / "cortex" / "screenshots"
+
+
 _screen_last_capture: dict[tuple, float] = {}
 _screen_last_capture_lock = threading.Lock()
 
@@ -1823,8 +1832,13 @@ def _capture_screen_context(storage, hint: str = "") -> None:
         if win_key in _screen_last_capture:
             return  # same window captured recently — skip
         _screen_last_capture[win_key] = now  # reserve before the slow call
+    save_path = None
+    if _screen_save_shots():
+        ts = datetime.now()
+        safe_app = re.sub(r"[^\w.-]", "_", win_key[0] or "win")[:40]
+        save_path = SCREENSHOT_DIR / ts.strftime("%Y-%m-%d") / f"{ts.strftime('%H-%M-%S')}-{safe_app}.png"
     try:
-        rec = screen.describe_active_window(_screen_denylist(), key, hint)
+        rec = screen.describe_active_window(_screen_denylist(), key, hint, save_path)
         if rec:
             storage.append_activity(rec)
             logger.debug("Screen context logged (%s): %s", rec.get("mode"), rec.get("app"))

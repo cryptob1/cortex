@@ -84,7 +84,7 @@ def _gemini_caption(png: bytes, api_key: str, hint: str = "") -> str | None:
 
         resp = httpx.post(
             GEMINI_URL.format(model=VISION_MODEL),
-            params={"key": api_key},
+            headers={"x-goog-api-key": api_key},  # header, not ?key= — keeps it out of URL logs
             json={
                 "contents": [{"parts": [
                     {"text": prompt},
@@ -130,12 +130,14 @@ def describe_active_window(
     denylist: list[str] | None = None,
     gemini_key: str | None = None,
     hint: str = "",
+    save_path=None,
 ) -> dict | None:
     """Return ``{'app', 'title', 'text', 'mode'}`` describing the focused window, or
     ``None`` if it should be skipped (denylisted / nothing captured). ``mode`` is
     'vision' (Gemini description), 'ocr' (local fallback), or 'title' (nothing read
     but the window title is still worth logging). The screenshot is discarded after
-    the call — only ``text`` persists."""
+    the call unless ``save_path`` is given (opt-in, local only) — otherwise only
+    ``text`` persists."""
     w = _active_window()
     cls = (w.get("class") or "").strip()
     title = (w.get("title") or "").strip()
@@ -147,6 +149,12 @@ def describe_active_window(
     png = _grab_png(w)
     if not png:
         return None
+    if save_path is not None:  # opt-in: keep the shot locally to eyeball what's captured
+        try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_bytes(png)
+        except OSError:
+            logger.debug("screen: could not save screenshot", exc_info=True)
 
     text, mode = "", "title"
     if gemini_key:
